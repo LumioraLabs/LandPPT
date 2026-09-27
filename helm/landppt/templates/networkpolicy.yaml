@@ -7,29 +7,29 @@ metadata:
     {{- include "landppt.labels" . | nindent 4 }}
 spec:
   podSelector:
-    matchLabels:
-      {{- include "landppt.selectorLabels" . | nindent 6 }}
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values:
+          - {{ include "landppt.name" . | quote }}
+      - key: app.kubernetes.io/instance
+        operator: In
+        values:
+          - {{ .Release.Name | quote }}
+      - key: app.kubernetes.io/component
+        operator: In
+        values:
+          - web
+          - worker
   policyTypes:
     - Ingress
     - Egress
+  # No from: kubelet probes and ingress controllers are outside this namespace,
+  # and NetworkPolicy does not exempt probes. Egress below stays limited.
   ingress:
-    - from:
-        - namespaceSelector: {}
-      ports:
+    - ports:
         - protocol: TCP
           port: {{ .Values.service.port }}
-        {{- if .Values.postgresql.enabled }}
-        - protocol: TCP
-          port: 5432
-        {{- end }}
-        {{- if .Values.valkey.enabled }}
-        - protocol: TCP
-          port: 6379
-        {{- end }}
-        {{- if .Values.minio.enabled }}
-        - protocol: TCP
-          port: 9000
-        {{- end }}
   egress:
     - to:
         - namespaceSelector: {}
@@ -38,12 +38,23 @@ spec:
           port: 53
         - protocol: UDP
           port: 53
-        - protocol: TCP
-          port: 443
+    - to:
+        - podSelector: {}
+      ports:
         - protocol: TCP
           port: 5432
         - protocol: TCP
           port: 6379
         - protocol: TCP
           port: 9000
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
 {{- end }}

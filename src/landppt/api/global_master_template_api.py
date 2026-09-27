@@ -2,6 +2,7 @@
 Global Master Template API endpoints
 """
 
+import asyncio
 import logging
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
@@ -16,7 +17,11 @@ from ..services.template.global_master_template_service import GlobalMasterTempl
 from ..auth.middleware import get_current_user_required
 from ..core.config import app_config
 from ..database.database import AsyncSessionLocal
-from ..services.credits_service import CreditsService
+from ..services.credits_service import (
+    CreditsService,
+    billable_operation_id,
+    billable_work_may_start,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -259,32 +264,66 @@ async def generate_template_with_ai(
                 "type": request.reference_pptx.type,
             }
 
-        # 使用AI生成服务（不保存到数据库）
-        result = await user_template_service.generate_template_with_ai(
-            prompt=request.prompt,
-            template_name=request.template_name,
-            description=request.description,
-            tags=request.tags,
-            generation_mode=request.generation_mode,
-            reference_image=reference_image_data,
-            reference_images=reference_images_data or None,
-            reference_pptx=reference_pptx_data,
-        )
-
-        # Deduct credits after successful generation.
+        template_operation_id = None
         if app_config.enable_credits_system and (provider_name or "").strip().lower() == "landppt":
-            try:
+            template_operation_id = billable_operation_id(
+                "template-generation",
+                user.id,
+                request.template_name or "",
+                request.prompt or "",
+            )
+            async with AsyncSessionLocal() as session:
+                reserved_ok, reserve_message, reserve_state = await CreditsService(
+                    session
+                ).reserve_for_operation(
+                    user.id,
+                    template_operation_id,
+                    "template_generation",
+                    1,
+                    reference_id=f"global_master_template:{request.template_name or ''}".rstrip(":"),
+                )
+            if not billable_work_may_start(reserve_state):
+                return {
+                    "success": reserve_state == "committed",
+                    "already_completed": reserve_state == "committed",
+                    "in_progress": reserve_state == "reserved",
+                    "message": reserve_message,
+                }
+            if reserve_state != "created":
+                template_operation_id = None
+            elif not reserved_ok:
+                template_operation_id = None
+
+        # 使用AI生成服务（不保存到数据库）
+        try:
+            result = await user_template_service.generate_template_with_ai(
+                prompt=request.prompt,
+                template_name=request.template_name,
+                description=request.description,
+                tags=request.tags,
+                generation_mode=request.generation_mode,
+                reference_image=reference_image_data,
+                reference_images=reference_images_data or None,
+                reference_pptx=reference_pptx_data,
+            )
+        except asyncio.CancelledError:
+            if template_operation_id:
                 async with AsyncSessionLocal() as session:
-                    credits_service = CreditsService(session)
-                    await credits_service.consume_credits(
-                        user_id=user.id,
-                        operation_type="template_generation",
-                        quantity=1,
-                        description="AI模板生成",
-                        reference_id=f"global_master_template:{request.template_name or ''}".rstrip(":"),
+                    await CreditsService(session).release_reservation(
+                        template_operation_id, "cancelled"
                     )
-            except Exception as e:
-                logger.error(f"Failed to consume credits for template generation: {e}")
+            raise
+        except Exception:
+            if template_operation_id:
+                async with AsyncSessionLocal() as session:
+                    await CreditsService(session).release_reservation(
+                        template_operation_id, "failure"
+                    )
+            raise
+
+        if template_operation_id:
+            async with AsyncSessionLocal() as session:
+                await CreditsService(session).commit_reservation(template_operation_id, 1)
 
         return {
             "success": True,
@@ -400,41 +439,67 @@ async def adjust_template(
                         return StreamingResponse(_err(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
                     return {"success": False, "message": message, "required": required, "balance": balance}
 
+    adjust_operation_id = None
+    adjust_state = "skipped"
+    if app_config.enable_credits_system and (provider_name or "").strip().lower() == "landppt":
+        adjust_operation_id = billable_operation_id(
+            "template-adjust", user.id, template_name, adjustment_request
+        )
+        async with AsyncSessionLocal() as session:
+            reserved_ok, reserve_message, adjust_state = await CreditsService(session).reserve_for_operation(
+                user.id,
+                adjust_operation_id,
+                "template_generation",
+                1,
+                reference_id=f"global_master_template_adjust:{template_name}".rstrip(":"),
+            )
+        if not reserved_ok or not billable_work_may_start(adjust_state):
+            blocked = {
+                "success": adjust_state == "committed",
+                "already_completed": adjust_state == "committed",
+                "in_progress": adjust_state == "reserved",
+                "message": reserve_message,
+            }
+            if want_stream:
+                async def blocked_adjust():
+                    yield f"data: {json.dumps({'type': 'error', **blocked})}\n\n"
+                return StreamingResponse(
+                    blocked_adjust(),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache"},
+                )
+            return blocked
+        if adjust_state != "created":
+            adjust_operation_id = None
+
+    adjust_box = [adjust_operation_id]
     if want_stream:
         async def adjust_stream():
             try:
                 # Send initial status
                 yield f"data: {json.dumps({'type': 'status', 'message': '正在分析调整需求...'})}\n\n"
 
-                credits_consumed = False
                 async for chunk in user_template_service.adjust_template_with_ai_stream(
                     current_html=current_html,
                     adjustment_request=adjustment_request,
                     template_name=template_name,
                 ):
-                    if (
-                        app_config.enable_credits_system
-                        and (provider_name or "").strip().lower() == "landppt"
-                        and (chunk or {}).get("type") == "complete"
-                        and not credits_consumed
-                    ):
-                        try:
-                            async with AsyncSessionLocal() as session:
-                                credits_service = CreditsService(session)
-                                await credits_service.consume_credits(
-                                    user_id=user.id,
-                                    operation_type="template_generation",
-                                    quantity=1,
-                                    description="AI模板调整",
-                                    reference_id=f"global_master_template_adjust:{template_name}".rstrip(":"),
-                                )
-                            credits_consumed = True
-                        except Exception as e:
-                            logger.error(f"Failed to consume credits for template adjustment: {e}")
+                    if adjust_operation_id and (chunk or {}).get("type") == "complete":
+                        async with AsyncSessionLocal() as session:
+                            await CreditsService(session).commit_reservation(adjust_operation_id, 1)
+                        adjust_box[0] = None
 
                     yield f"data: {json.dumps(chunk)}\n\n"
 
+            except asyncio.CancelledError:
+                if adjust_box[0]:
+                    async with AsyncSessionLocal() as session:
+                        await CreditsService(session).release_reservation(adjust_box[0], "cancelled")
+                raise
             except Exception as e:
+                if adjust_box[0]:
+                    async with AsyncSessionLocal() as session:
+                        await CreditsService(session).release_reservation(adjust_box[0], "failure")
                 logger.error(f"Failed to adjust template: {e}")
                 yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
@@ -449,33 +514,37 @@ async def adjust_template(
 
     # Default: return JSON (more compatible with `apiClient` callers).
     complete_event = None
-    async for chunk in user_template_service.adjust_template_with_ai_stream(
-        current_html=current_html,
-        adjustment_request=adjustment_request,
-        template_name=template_name,
-    ):
-        if (chunk or {}).get("type") == "error":
-            raise HTTPException(status_code=500, detail=(chunk or {}).get("message") or "Template adjustment failed")
-        if (chunk or {}).get("type") == "complete" and (chunk or {}).get("html_template"):
-            complete_event = chunk
-            break
+    try:
+        async for chunk in user_template_service.adjust_template_with_ai_stream(
+            current_html=current_html,
+            adjustment_request=adjustment_request,
+            template_name=template_name,
+        ):
+            if (chunk or {}).get("type") == "error":
+                raise HTTPException(status_code=500, detail=(chunk or {}).get("message") or "Template adjustment failed")
+            if (chunk or {}).get("type") == "complete" and (chunk or {}).get("html_template"):
+                complete_event = chunk
+                break
+    except asyncio.CancelledError:
+        if adjust_operation_id:
+            async with AsyncSessionLocal() as session:
+                await CreditsService(session).release_reservation(adjust_operation_id, "cancelled")
+        raise
+    except HTTPException:
+        if adjust_operation_id:
+            async with AsyncSessionLocal() as session:
+                await CreditsService(session).release_reservation(adjust_operation_id, "failure")
+        raise
 
     if not complete_event:
+        if adjust_operation_id:
+            async with AsyncSessionLocal() as session:
+                await CreditsService(session).release_reservation(adjust_operation_id, "failure")
         raise HTTPException(status_code=500, detail="Template adjustment failed")
 
-    if app_config.enable_credits_system and (provider_name or "").strip().lower() == "landppt":
-        try:
-            async with AsyncSessionLocal() as session:
-                credits_service = CreditsService(session)
-                await credits_service.consume_credits(
-                    user_id=user.id,
-                    operation_type="template_generation",
-                    quantity=1,
-                    description="AI模板调整",
-                    reference_id=f"global_master_template_adjust:{template_name}".rstrip(":"),
-                )
-        except Exception as e:
-            logger.error(f"Failed to consume credits for template adjustment: {e}")
+    if adjust_operation_id:
+        async with AsyncSessionLocal() as session:
+            await CreditsService(session).commit_reservation(adjust_operation_id, 1)
 
     return {"success": True, "data": complete_event}
 

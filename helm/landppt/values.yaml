@@ -80,11 +80,17 @@ app:
     DB_POOL_RECYCLE: "1800"
   # 敏感配置（写入 Secret）。生产环境必须改用 existingSecret。
   secrets: {}
-  # 使用已有 Secret（key 即环境变量名）
+  # 使用已有 Secret（key 即环境变量名）。生产环境必须设置 existingSecret，
+  # 并在 existingSecretKeys 中声明这些键名（值留在集群里，不要写进 Git）：
+  # SECRET_KEY, LANDPPT_CONFIG_ENCRYPTION_KEYS, STRIPE_SECRET_KEY,
+  # STRIPE_WEBHOOK_SECRET, LANDPPT_BILLING_CREDIT_PACKS_JSON
   existingSecret: ""
+  existingSecretKeys: []
+  production: false
 
 migration:
   enabled: false
+  # Keep false. A pre-install hook cannot read this chart's Secret or reach in-chart PostgreSQL.
   hook: false
   backoffLimit: 3
   annotations: {}
@@ -218,7 +224,7 @@ livenessProbe:
   failureThreshold: 3
 readinessProbe:
   httpGet:
-    path: /health
+    path: /ready
     port: http
   initialDelaySeconds: 15
   periodSeconds: 10

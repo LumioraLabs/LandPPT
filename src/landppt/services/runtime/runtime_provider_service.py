@@ -148,12 +148,13 @@ class RuntimeProviderService:
             return response
 
         if system_prompt:
-            system_prompt = SystemPrompts.with_cache_prefix(system_prompt)
-            # 统一把 system_prompt 转成系统消息，避免上层传参后被静默忽略。
-            messages = SystemPrompts.normalize_messages_for_cache([
+            # Caller-supplied system prompts are sent unchanged. Cache-prefix
+            # normalization belongs to SystemPrompts.normalize_messages_for_cache
+            # and must not rewrite an explicit system message.
+            messages = [
                 AIMessage(role=MessageRole.SYSTEM, content=system_prompt),
                 AIMessage(role=MessageRole.USER, content=prompt),
-            ])
+            ]
             return record_completion(await provider.chat_completion(messages=messages, **kwargs))
         prompt = SystemPrompts.with_text_cache_prefix(prompt)
         if role == 'outline' and settings.get('provider') == 'anthropic':
@@ -183,11 +184,10 @@ class RuntimeProviderService:
                 kwargs.setdefault('top_p', ai_config.top_p)
         system_prompt = str(kwargs.pop('system_prompt', '') or '').strip()
         if system_prompt:
-            system_prompt = SystemPrompts.with_cache_prefix(system_prompt)
-            messages = SystemPrompts.normalize_messages_for_cache([
+            messages = [
                 AIMessage(role=MessageRole.SYSTEM, content=system_prompt),
                 AIMessage(role=MessageRole.USER, content=prompt),
-            ])
+            ]
             async for chunk in provider.stream_chat_completion(messages=messages, **kwargs):
                 yield chunk
             return

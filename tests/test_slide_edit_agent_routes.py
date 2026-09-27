@@ -388,15 +388,33 @@ def _patch_billing(monkeypatch, service=None, agent_service=None):
         checks.append(kwargs.get("provider_name"))
         return True, 1, 10
 
-    async def consume_credits(*args, **kwargs):
-        charges.append({"args": args, "kwargs": kwargs})
+    held = {}
+
+    async def reserve_billable(user_id, operation_id, operation_type, quantity=1, **kwargs):
+        held["user_id"] = user_id
+        held["operation_type"] = operation_type
+        held["kwargs"] = kwargs
+        return True, "ok", "created"
+
+    async def commit_billable(operation_id, units):
+        charges.append(
+            {
+                "args": (held["user_id"], held["operation_type"], units),
+                "kwargs": held["kwargs"],
+            }
+        )
         return True, "ok"
+
+    async def release_billable(*args, **kwargs):
+        return None
 
     monkeypatch.setattr(
         routes, "get_ppt_service_for_user", lambda user_id: service or _FakePPTService()
     )
     monkeypatch.setattr(routes, "check_credits_for_operation", check_credits)
-    monkeypatch.setattr(routes, "consume_credits_for_operation", consume_credits)
+    monkeypatch.setattr(routes, "reserve_billable_operation", reserve_billable)
+    monkeypatch.setattr(routes, "commit_billable_operation", commit_billable)
+    monkeypatch.setattr(routes, "release_billable_operation", release_billable)
     if agent_service is not None:
         monkeypatch.setattr(routes, "SlideEditAgentService", agent_service)
     return checks, charges

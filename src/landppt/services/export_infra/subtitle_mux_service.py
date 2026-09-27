@@ -86,7 +86,10 @@ def resolve_subtitle_style(
 
 
 def build_subtitle_filter(*, subtitle_path: str, width: int, height: int, style: SubtitleStyle) -> str:
-    subtitle_ref = Path(subtitle_path).name.replace("\\", "/").replace(":", r"\:")
+    # Basename must be separator-agnostic: Linux Path does not split on backslash,
+    # so a Windows path would otherwise be passed to ffmpeg verbatim.
+    normalized = str(subtitle_path or "").replace("\\", "/")
+    subtitle_ref = Path(normalized).name.replace(":", r"\:")
     return (
         f"subtitles={subtitle_ref}:original_size={int(width)}x{int(height)}:"
         f"force_style='{style.to_ffmpeg_force_style()}'"

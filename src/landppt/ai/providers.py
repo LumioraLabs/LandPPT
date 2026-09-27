@@ -1627,6 +1627,7 @@ class AIProviderFactory:
         "google": GoogleProvider,
         "gemini": GoogleProvider,  # Alias for google
         "ollama": OllamaProvider,
+        "minimax": OpenAIProvider,  # MiniMax exposes an OpenAI-compatible chat API
         "302ai": OpenAIProvider,  # 302.AI uses OpenAI-compatible API
         "landppt": OpenAIProvider,  # LandPPT Official uses OpenAI-compatible API
     }

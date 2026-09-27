@@ -56,6 +56,9 @@ class TestOutlineBillingParity:
         assert "_resolve_outline_llm_call_count(outline, default=1)" in source
         # Only the *charge* must scale; the pre-flight affordability check may
         # legitimately probe for a single credit.
+        assert "commit_billable_operation" in source
+        assert "outline_llm_call_count" in source
+        assert "min(outline_hold, max(0, outline_llm_call_count))" in source
         consume_blocks = [
             source[match:match + 400]
             for match in [
@@ -63,19 +66,21 @@ class TestOutlineBillingParity:
                 if source.startswith("await consume_credits_for_operation(", index)
             ]
         ]
-        assert consume_blocks, "no billing call found"
         assert not any(
             '"outline_generation", 1,' in block for block in consume_blocks
         ), "flat-rate billing diverged from the streaming route"
 
     def test_streaming_bills_before_yielding_done(self):
         source = _read("web/route_modules/outline_generation_routes.py")
+        assert source.index("reserve_billable_operation") < source.index(
+            "generate_outline_streaming"
+        )
         marker = "async for chunk in chunk_source:"
         body = _slice(source, marker, 2200)
-        assert "consume_credits_for_operation" in body
+        assert "commit_billable_operation" in body
         # The charge must be applied before the chunk reaches a client that may
         # then disconnect and close the generator.
-        assert body.index("consume_credits_for_operation") < body.index("yield chunk")
+        assert body.index("commit_billable_operation") < body.index("yield chunk")
 
     def test_stream_error_marks_the_stage_failed(self):
         source = _read("web/route_modules/outline_generation_routes.py")

@@ -29,9 +29,12 @@ from ...services.slide.slide_edit_agent_service import (
 )
 from ...services.slide.edit_agent.schema import new_run_id
 from .support import (
+    billable_work_may_start,
     check_credits_for_operation,
-    consume_credits_for_operation,
+    commit_billable_operation,
     get_ppt_service_for_user,
+    release_billable_operation,
+    reserve_billable_operation,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,27 +75,6 @@ def _agent_provider_role(request: SlideEditAgentRequest) -> str:
         request.slideScreenshot or request.elementScreenshot or request.images
     )
     return "vision_analysis" if request.visionEnabled and has_vision_input else "editor"
-
-
-async def _charge_completed_agent_run(
-    *,
-    user_id: int,
-    request: SlideEditAgentRequest,
-    provider_name: str | None,
-) -> None:
-    try:
-        success, message = await consume_credits_for_operation(
-            user_id,
-            "ai_edit",
-            1,
-            description=f"AI Agent edit: slide {request.slideIndex} {request.slideTitle or ''}".strip(),
-            reference_id=request.projectId,
-            provider_name=provider_name,
-        )
-        if not success:
-            logger.warning("Slide edit agent credit charge failed: %s", message)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Slide edit agent credit charge raised: %s", exc, exc_info=True)
 
 
 @router.post("/api/ai/slide-edit-agent/stream")
@@ -136,6 +118,34 @@ async def stream_slide_edit_agent(
             headers=_STREAM_HEADERS,
         )
 
+    reserved_ok, reserve_message, reserve_state = await reserve_billable_operation(
+        user.id,
+        run_id,
+        "ai_edit",
+        1,
+        reference_id=request.projectId,
+        provider_name=provider_name,
+    )
+    if not reserved_ok or not billable_work_may_start(reserve_state):
+        return StreamingResponse(
+            iter(
+                [
+                    _sse(
+                        {
+                            "type": agent_events.ERROR,
+                            "runId": run_id,
+                            "phase": "credits",
+                            "message": reserve_message,
+                            "in_progress": reserve_state == "reserved",
+                            "already_completed": reserve_state == "committed",
+                        }
+                    )
+                ]
+            ),
+            media_type="text/event-stream",
+            headers=_STREAM_HEADERS,
+        )
+
     async def event_stream():
         charged = False
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -171,12 +181,8 @@ async def stream_slide_edit_agent(
                 if event.get("type") == _STREAM_SENTINEL:
                     break
 
-                if _is_billable_agent_completion(event) and not charged:
-                    await _charge_completed_agent_run(
-                        user_id=user.id,
-                        request=request,
-                        provider_name=provider_name,
-                    )
+                if _is_billable_agent_completion(event) and not charged and reserve_state == "created":
+                    await commit_billable_operation(run_id, 1)
                     charged = True
 
                 yield _sse(event)
@@ -188,8 +194,12 @@ async def stream_slide_edit_agent(
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+            if reserve_state == "created" and not charged:
+                await release_billable_operation(run_id, "cancelled")
             raise
         finally:
+            if reserve_state == "created" and not charged:
+                await release_billable_operation(run_id, "unbilled")
             agent_run_registry.release(run_id)
 
     return StreamingResponse(

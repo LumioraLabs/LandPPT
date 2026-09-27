@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 
 
 async def _migrate() -> bool:
+    from .core.config import app_config
+    from .core.production_config import validate_production_config
+
+    validate_production_config(app_config)
     await init_db(bootstrap_admin=False)
     return await migration_manager.migrate_up()
 
@@ -239,12 +243,48 @@ def backfill_image_artifacts(cache_dirs: tuple[str, ...], default_user_id: int |
     )
 
 
+async def _reconcile_payments() -> dict[str, int]:
+    from .core.config import app_config
+    from .core.production_config import validate_production_config
+    from .database.database import AsyncSessionLocal
+    from .services.billing_service import BillingService
+
+    validate_production_config(app_config)
+    async with AsyncSessionLocal() as session:
+        return await BillingService(session).reconcile_stored_events()
+
+
+@cli.command("reconcile-payments")
+def reconcile_payments() -> None:
+    """Repair local payment orders from stored webhook receipts."""
+    result = _run_async(_reconcile_payments())
+    click.echo(
+        "Payment reconciliation completed: "
+        f"repaired={result['repaired']} stalled={result['stalled']} "
+        f"unfulfilled={result['unfulfilled']}"
+    )
+
+
+@cli.command("ready")
+def ready() -> None:
+    """Exit 0 only when database, cache/queue, and storage are usable."""
+    from .core.readiness import assess_readiness
+
+    failures = _run_async(assess_readiness())
+    if failures:
+        raise click.ClickException("Not ready: " + ", ".join(failures))
+    click.echo("ready")
+
+
 @cli.command("worker")
 @click.option("--queue", "queue_name", default=None, help="Queue name to consume. Defaults to TASK_QUEUE_NAME.")
 def worker(queue_name: str | None = None) -> None:
     """Run a queued task worker process."""
+    from .core.config import app_config
+    from .core.production_config import validate_production_config
     from .tasks.worker import run_worker
 
+    validate_production_config(app_config)
     _run_async(run_worker(queue_name=queue_name))
 
 

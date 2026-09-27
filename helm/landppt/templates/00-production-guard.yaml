@@ -1,0 +1,58 @@
+{{- if .Values.app.production }}
+{{- $env := .Values.app.env | default dict }}
+{{- $public := index $env "LANDPPT_PUBLIC_BASE_URL" | default "" | toString }}
+{{- if not (hasPrefix "https://" $public) }}
+{{- fail "production requires app.env.LANDPPT_PUBLIC_BASE_URL to be an https URL" }}
+{{- end }}
+{{- $mode := index $env "LANDPPT_DEPLOYMENT_MODE" | default "" | toString | lower }}
+{{- if not (has $mode (list "production" "prod")) }}
+{{- fail "production requires app.env.LANDPPT_DEPLOYMENT_MODE=production" }}
+{{- end }}
+{{- $hosts := index $env "LANDPPT_ALLOWED_HOSTS" | default "" | toString }}
+{{- if or (eq $hosts "") (eq $hosts "*") (contains "*" $hosts) }}
+{{- fail "production requires app.env.LANDPPT_ALLOWED_HOSTS to list explicit hosts" }}
+{{- end }}
+{{- $cidrs := index $env "LANDPPT_TRUSTED_PROXY_CIDRS" | default "" | toString }}
+{{- if not $cidrs }}
+{{- fail "production requires app.env.LANDPPT_TRUSTED_PROXY_CIDRS" }}
+{{- end }}
+{{- $billing := index $env "LANDPPT_BILLING_ENABLED" | default "" | toString | lower }}
+{{- $credits := index $env "ENABLE_CREDITS_SYSTEM" | default "" | toString | lower }}
+{{- if not (has $billing (list "true" "1" "yes")) }}
+{{- fail "production requires app.env.LANDPPT_BILLING_ENABLED=true" }}
+{{- end }}
+{{- if not (has $credits (list "true" "1" "yes")) }}
+{{- fail "production requires app.env.ENABLE_CREDITS_SYSTEM=true when billing is enabled" }}
+{{- end }}
+{{- $secure := index $env "LANDPPT_SESSION_COOKIE_SECURE" | default "" | toString | lower }}
+{{- $csrf := index $env "LANDPPT_CSRF_ORIGIN_CHECK_ENABLED" | default "" | toString | lower }}
+{{- $bootstrap := index $env "LANDPPT_BOOTSTRAP_ADMIN_ENABLED" | default "" | toString | lower }}
+{{- if not (has $secure (list "true" "1" "yes")) }}
+{{- fail "production requires app.env.LANDPPT_SESSION_COOKIE_SECURE=true" }}
+{{- end }}
+{{- if not (has $csrf (list "true" "1" "yes")) }}
+{{- fail "production requires app.env.LANDPPT_CSRF_ORIGIN_CHECK_ENABLED=true" }}
+{{- end }}
+{{- if not (has $bootstrap (list "false" "0" "no")) }}
+{{- fail "production requires app.env.LANDPPT_BOOTSTRAP_ADMIN_ENABLED=false" }}
+{{- end }}
+{{- if not .Values.app.existingSecret }}
+{{- fail "production requires app.existingSecret; do not commit Stripe or encryption material" }}
+{{- end }}
+{{- $required := list "SECRET_KEY" "LANDPPT_CONFIG_ENCRYPTION_KEYS" "STRIPE_SECRET_KEY" "STRIPE_WEBHOOK_SECRET" "LANDPPT_BILLING_CREDIT_PACKS_JSON" }}
+{{- $declared := .Values.app.existingSecretKeys | default (list) }}
+{{- range $key := $required }}
+{{- if not (has $key $declared) }}
+{{- fail (printf "app.existingSecretKeys must name %s" $key) }}
+{{- end }}
+{{- end }}
+{{- if not .Values.networkPolicy.enabled }}
+{{- fail "production requires networkPolicy.enabled=true" }}
+{{- end }}
+{{- if not .Values.migration.enabled }}
+{{- fail "production requires migration.enabled=true" }}
+{{- end }}
+{{- if .Values.migration.hook }}
+{{- fail "production requires migration.hook=false; a pre-install hook cannot see in-chart PostgreSQL or release Secrets" }}
+{{- end }}
+{{- end }}

@@ -92,3 +92,55 @@ def test_cli_migrate_fails_when_migration_fails(monkeypatch):
 
     assert result.exit_code != 0
     assert "Database migration failed" in result.output
+
+
+def test_worker_refuses_unsafe_production_config_before_starting(monkeypatch):
+    from landppt import cli as cli_module
+    from test_production_config import _SECRET, _STRIPE_KEY, _WEBHOOK_SECRET, _config
+
+    started = []
+
+    async def fake_run_worker(queue_name=None):
+        started.append(queue_name)
+
+    async def fake_close_db():
+        started.append("close")
+
+    monkeypatch.setattr("landppt.tasks.worker.run_worker", fake_run_worker)
+    monkeypatch.setattr(cli_module, "close_db", fake_close_db)
+    monkeypatch.setattr(
+        "landppt.core.config.app_config",
+        _config(secret_key="short", stripe_secret_key=_STRIPE_KEY),
+    )
+
+    result = CliRunner().invoke(cli_module.cli, ["worker"])
+
+    assert result.exit_code != 0
+    assert started == []
+    message = f"{result.output}\n{result.exception}"
+    assert "SECRET_KEY" in message
+    assert _SECRET not in message
+    assert _STRIPE_KEY not in message
+    assert _WEBHOOK_SECRET not in message
+
+
+def test_worker_starts_after_valid_production_config(monkeypatch):
+    from landppt import cli as cli_module
+    from test_production_config import _config
+
+    started = []
+
+    async def fake_run_worker(queue_name=None):
+        started.append(queue_name)
+
+    async def fake_close_db():
+        started.append("close")
+
+    monkeypatch.setattr("landppt.tasks.worker.run_worker", fake_run_worker)
+    monkeypatch.setattr(cli_module, "close_db", fake_close_db)
+    monkeypatch.setattr("landppt.core.config.app_config", _config())
+
+    result = CliRunner().invoke(cli_module.cli, ["worker", "--queue", "slides"])
+
+    assert result.exit_code == 0, result.output
+    assert started == ["slides", "close"]

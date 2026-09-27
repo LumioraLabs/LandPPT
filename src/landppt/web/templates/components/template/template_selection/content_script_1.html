@@ -205,6 +205,8 @@
                 <iframe
                     class="template-preview-iframe"
                     id="iframe-${template.id}"
+                    sandbox="allow-same-origin"
+                    referrerpolicy="no-referrer"
                     onload="adjustIframeContent(${template.id})"
                 ></iframe>
                 <div class="preview-overlay" onclick="event.stopPropagation(); previewTemplate(${template.id})">

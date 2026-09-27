@@ -4,8 +4,9 @@
 
 from abc import ABC, abstractmethod
 from typing import List, Optional, Dict, Any, AsyncGenerator
-import logging
 import asyncio
+import logging
+import time
 from pathlib import Path
 
 from ..models import (
@@ -29,7 +30,7 @@ class BaseImageProvider(ABC):
         
         # 请求计数器（简单的速率限制）
         self._request_count = 0
-        self._last_reset = asyncio.get_event_loop().time()
+        self._last_reset = time.monotonic()
     
     @property
     @abstractmethod
@@ -45,7 +46,7 @@ class BaseImageProvider(ABC):
     
     async def _check_rate_limit(self) -> bool:
         """检查速率限制"""
-        current_time = asyncio.get_event_loop().time()
+        current_time = time.monotonic()
         
         # 每分钟重置计数器
         if current_time - self._last_reset > 60:

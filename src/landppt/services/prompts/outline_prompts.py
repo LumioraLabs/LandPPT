@@ -21,7 +21,8 @@ class OutlinePrompts:
         tz_name = now.tzname() or "Local"
         return "\n".join([
             f"- 当前本地时间：{now:%Y-%m-%d %H:%M:%S} ({tz_name})",
-            f"- 当前年份：{now:%Y}，月份：{now.month}，季度：Q{quarter}",
+            f"- 当前年份：{now:%Y}，月份：{now.month}",
+            f"- 当前季度：Q{quarter}",
             '- 若大纲需使用\u201c当前/今年/本月/本季度/最近\u201d等时间语义，请以上述时间为准；若项目需求或来源材料已给出明确日期，优先使用来源值。',
         ])
 
@@ -32,7 +33,8 @@ class OutlinePrompts:
         tz_name = now.tzname() or "Local"
         return "\n".join([
             f"- Current local time: {now:%Y-%m-%d %H:%M:%S} ({tz_name})",
-            f"- Current year: {now:%Y}, month: {now.month}, quarter: Q{quarter}",
+            f"- Current year: {now:%Y}, month: {now.month}",
+            f"- Current quarter: Q{quarter}",
             "- If the outline uses time-sensitive phrasing (\"current\", \"this year\", etc.), use the time above. If the brief or source material gives an explicit date, prefer the source value.",
         ])
 

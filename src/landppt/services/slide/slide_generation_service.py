@@ -29,6 +29,8 @@ class SlideGenerationService:
                 import time
                 db_manager_status = None
                 cache = None
+                credits_reference_id = None
+                credits_reservation_owned = False
 
                 project = await self.project_manager.get_project(project_id)
                 if not project:
@@ -235,6 +237,7 @@ class SlideGenerationService:
                 ppt_creation_started_at = time.time()
                 credits_provider_name: str | None = None
                 credits_reference_id: str | None = None
+                credits_reservation_owned = False
                 credits_expected_new_slides = 0
                 credits_should_bill = False
                 try:
@@ -289,6 +292,7 @@ class SlideGenerationService:
                         credits_should_bill = False
 
                 if credits_should_bill:
+                    existing_with_html: set[int] = set()
                     try:
                         from ..db_project_manager import DatabaseProjectManager
                         db_manager = DatabaseProjectManager()
@@ -296,7 +300,13 @@ class SlideGenerationService:
                         existing_with_html = {
                             int(s.get("page_number", 0)) - 1
                             for s in (existing_slides or [])
-                            if s and s.get("html_content") and int(s.get("page_number", 0)) > 0
+                            if s
+                            and s.get("html_content")
+                            and int(s.get("page_number", 0)) > 0
+                            and not (
+                                s.get("generation_failed")
+                                and not s.get("is_user_edited", False)
+                            )
                         }
                         credits_expected_new_slides = sum(
                             1 for idx in range(len(slides)) if idx not in existing_with_html
@@ -306,7 +316,16 @@ class SlideGenerationService:
                         credits_expected_new_slides = len(slides)
 
                     if credits_expected_new_slides > 0:
-                        credits_reference_id = f"{project_id}:ppt_creation:{int(ppt_creation_started_at * 1000)}"
+                        from ..credits_service import billable_operation_id
+
+                        new_slide_indexes = [
+                            idx for idx in range(len(slides)) if idx not in existing_with_html
+                        ]
+                        credits_reference_id = billable_operation_id(
+                            "ppt-creation",
+                            project_id,
+                            ",".join(str(idx) for idx in new_slide_indexes),
+                        )
                         try:
                             from ..credits_service import CreditsService
                             from ...database.database import AsyncSessionLocal
@@ -358,6 +377,32 @@ class SlideGenerationService:
                             yield f"data: {json.dumps({'type': 'error', 'message': message})}\n\n"
                             return
 
+                if (
+                    credits_should_bill
+                    and credits_reference_id
+                    and credits_expected_new_slides > 0
+                    and self.user_id is not None
+                ):
+                    from ..credits_service import CreditsService, billable_work_may_start
+                    from ...database.database import AsyncSessionLocal
+
+                    async with AsyncSessionLocal() as session:
+                        reserved_ok, reserve_message, reserve_state = await CreditsService(
+                            session
+                        ).reserve_for_operation(
+                            self.user_id,
+                            credits_reference_id,
+                            "slide_generation",
+                            credits_expected_new_slides,
+                            reference_id=project_id,
+                        )
+                    if not billable_work_may_start(reserve_state):
+                        yield f"data: {json.dumps({'type': 'in_progress' if reserve_state == 'reserved' else 'error', 'message': reserve_message, 'already_completed': reserve_state == 'committed'})}\n\n"
+                        return
+                    credits_reservation_owned = reserve_state == "created"
+                    if not reserved_ok:
+                        credits_reservation_owned = False
+
                 # Cache service (used for cooperative cancellation)
                 try:
                     from ..cache_service import get_cache_service
@@ -405,6 +450,21 @@ class SlideGenerationService:
                                 )
                             except Exception:
                                 pass
+                            if credits_reservation_owned and credits_reference_id:
+                                try:
+                                    from ...database.database import AsyncSessionLocal
+                                    from ..credits_service import CreditsService
+
+                                    async with AsyncSessionLocal() as session:
+                                        await CreditsService(session).release_reservation(
+                                            credits_reference_id, "cancelled"
+                                        )
+                                    credits_reservation_owned = False
+                                except Exception:
+                                    logger.exception(
+                                        "Failed to release PPT reservation after stop for project %s",
+                                        project_id,
+                                    )
                             yield f"data: {json.dumps({'type': 'error', 'message': cancel_message})}\n\n"
                             return
                     except Exception as cancel_check_error:
@@ -753,54 +813,34 @@ class SlideGenerationService:
                     logger.error(f"Failed to update project status in database: {save_error}")
                     # Continue anyway, as the data is still in memory
 
-                # Bill credits once per PPT creation run (best-effort; only for billable providers).
-                if (
-                    app_config.enable_credits_system
-                    and credits_should_bill
-                    and credits_reference_id
-                    and self.user_id is not None
-                    and generated_slide_indices
-                ):
+                if credits_reservation_owned and credits_reference_id:
                     try:
-                        from sqlalchemy import select, func
-                        from ...database.models import CreditTransaction
                         from ...database.database import AsyncSessionLocal
                         from ..credits_service import CreditsService
 
                         async with AsyncSessionLocal() as session:
-                            billed_stmt = select(func.count(CreditTransaction.id)).where(
-                                CreditTransaction.user_id == self.user_id,
-                                CreditTransaction.transaction_type == "consume",
-                                CreditTransaction.reference_id == credits_reference_id,
-                                CreditTransaction.amount < 0,
+                            billed_ok, billed_msg, _charged = await CreditsService(
+                                session
+                            ).commit_reservation(
+                                credits_reference_id,
+                                len(generated_slide_indices),
                             )
-                            already_billed = (await session.execute(billed_stmt)).scalar() or 0
-                            if not already_billed:
-                                credits_service = CreditsService(session)
-                                billed_ok, billed_msg = await credits_service.consume_credits(
-                                    user_id=self.user_id,
-                                    operation_type="slide_generation",
-                                    quantity=len(generated_slide_indices),
-                                    description=f"PPT generation: {getattr(project, 'topic', '')}",
-                                    reference_id=credits_reference_id,
-                                )
-                                if billed_ok:
-                                    logger.info(
-                                        "Billed %s slides for project %s (%s): %s",
-                                        len(generated_slide_indices),
-                                        project_id,
-                                        credits_reference_id,
-                                        billed_msg,
-                                    )
-                                else:
-                                    logger.warning(
-                                        "Slide credits billing skipped/failed for project %s: %s",
-                                        project_id,
-                                        billed_msg,
-                                    )
+                        credits_reservation_owned = False
+                        if billed_ok:
+                            logger.info(
+                                "Committed slide reservation for project %s: %s",
+                                project_id,
+                                billed_msg,
+                            )
+                        else:
+                            logger.warning(
+                                "Slide reservation commit failed for project %s: %s",
+                                project_id,
+                                billed_msg,
+                            )
                     except Exception as billing_error:
                         logger.error(
-                            "Credits consumption error for ppt_creation (project=%s): %s",
+                            "Credits commit error for ppt_creation (project=%s): %s",
                             project_id,
                             billing_error,
                             exc_info=True,
@@ -831,7 +871,31 @@ class SlideGenerationService:
                     }
                 yield f"data: {json.dumps(complete_response)}\n\n"
 
+            except asyncio.CancelledError:
+                if credits_reservation_owned and credits_reference_id:
+                    from ...database.database import AsyncSessionLocal
+                    from ..credits_service import CreditsService
+
+                    async with AsyncSessionLocal() as session:
+                        await CreditsService(session).release_reservation(
+                            credits_reference_id, "cancelled"
+                        )
+                raise
             except Exception as e:
+                if credits_reservation_owned and credits_reference_id:
+                    try:
+                        from ...database.database import AsyncSessionLocal
+                        from ..credits_service import CreditsService
+
+                        async with AsyncSessionLocal() as session:
+                            await CreditsService(session).release_reservation(
+                                credits_reference_id, "failure"
+                            )
+                    except Exception:
+                        logger.exception(
+                            "Failed to release PPT reservation for project %s",
+                            project_id,
+                        )
                 logger.error(f"Error in streaming PPT generation: {e}")
                 # Persist failure state so reconnect/follow-mode can stop promptly
                 try:

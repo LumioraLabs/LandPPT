@@ -45,16 +45,25 @@ class CacheService:
 
         except ImportError:
             logger.warning("valkey package not installed; falling back to in-memory cache")
-            self._client = None
-            self._connected = False
+            await self._discard_client()
             self.enabled = False
             return False
         except Exception as e:
             logger.warning(f"Failed to connect to Valkey at {self.url}; falling back to in-memory cache: {e}")
-            self._client = None
-            self._connected = False
+            await self._discard_client()
             self.enabled = False
             return False
+
+    async def _discard_client(self) -> None:
+        client = self._client
+        self._client = None
+        self._connected = False
+        if client is None:
+            return
+        try:
+            await client.close()
+        except Exception:
+            pass
     
     async def disconnect(self):
         """Disconnect from Valkey server"""

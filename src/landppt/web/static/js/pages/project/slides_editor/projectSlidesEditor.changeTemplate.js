@@ -730,6 +730,8 @@ function _tplRenderTemplatePreview(container, template, options = {}) {
     stage.className = mode === 'card' ? 'tpl-card-preview-stage' : 'tpl-preview-stage';
 
     const iframe = document.createElement('iframe');
+    iframe.setAttribute('sandbox', 'allow-same-origin');
+    iframe.setAttribute('referrerpolicy', 'no-referrer');
     iframe.className = mode === 'card' ? 'tpl-card-preview-frame' : 'tpl-preview-frame';
     iframe.title = `${normalizedTemplate.template_name || '模板'}预览`;
     iframe.loading = 'lazy';

@@ -11,7 +11,9 @@ temp_inspect/
 research_reports/
 wheels/
 .claude/
-docs/
+docs/*
+!docs/commercial-readiness/
+!docs/commercial-readiness/*.md
 data/
 *.egg-info
 requires.md

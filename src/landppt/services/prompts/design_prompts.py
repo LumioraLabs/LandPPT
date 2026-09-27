@@ -3,9 +3,12 @@ PPT设计基因和视觉指导相关提示词
 包含所有用于设计分析和视觉指导的提示词模板
 """
 
-from typing import Dict, Any
 import json
 import logging
+import re
+from typing import Any, Dict
+
+from bs4 import BeautifulSoup
 
 from .system_prompts import SystemPrompts
 from .prompt_utils import apply_page_number_prompt_filter
@@ -53,6 +56,7 @@ class DesignPrompts:
     def _build_canvas_system_context() -> str:
         return """
 **固定画布系统**
+**固定画布实现提醒**
 - 1280×720 外框约束先行；仅画布根容器与安全裁切层使用 overflow:hidden，不要给每个卡片默认 overflow:hidden；三段式骨架（页眉/主体/页脚），页眉页脚不可压缩。
 - 先做高度预算再设计；间距用 gap/百分比/clamp()，避免大号固定 padding/margin 硬顶。
 - 锚点区稳定，主内容区 flex:1 / grid minmax(0,1fr)，所有 flex/grid item 显式 min-height:0; min-width:0。
@@ -71,14 +75,21 @@ class DesignPrompts:
 
     # -- 内容与设计质量（合并原先 content_quality + slide_generation_principles）--
     @staticmethod
-    def _build_design_quality_context() -> str:
+    def _build_content_quality_context() -> str:
         return """
 **内容与设计质量**
-- 信息密度与主题复杂度相称：先建立事实和层次，再加入装饰。
+- 信息密度与主题复杂度相称；资料不足时先补足事实、层次和结论，再加入装饰。
 - 留白服务于分组和节奏，不替代内容；背景、数据、结论形成有区分度的前后层次。
 - 先为页面建立清晰的第一视觉落点，再展开阅读动线。
 - 通过分组、对比、层叠、方向变化或留白张力建立主次关系——即使内容项数量对等，也通过尺寸、位置、色彩重量的差异制造视觉层次。
+- 避免把信息平均切成四宫格这类均质化结构；即使内容天然四等分，也应通过主次、轻重、大小、节奏或焦点转移建立层次差异。
 - 当内容偏多时，优先换一种更合适的组织方式，再考虑压缩细节。
+""".strip()
+
+    @staticmethod
+    def _build_design_quality_context() -> str:
+        return f"""
+{DesignPrompts._build_content_quality_context()}
 
 **组件一致性**
 - 同级步骤/节点的标记形态统一：全数字，或「数字+同构小图标」；禁止同一序列内有的纯图标、有的纯数字。
@@ -103,7 +114,7 @@ class DesignPrompts:
     @staticmethod
     def _build_creative_direction_context() -> str:
         return """
-**创意方向**
+**创意思考顺序**
 先明确这一页的核心任务（聚焦/展开/对比/总结/转场），再确定视觉重心和阅读路径，最后决定空间组织和装饰策略。
 装饰和点缀放大构图，但不能替代构图。
 """.strip()
@@ -186,6 +197,68 @@ class DesignPrompts:
         return strip_base64_image_payloads_for_prompt(template_html or "")
 
     @staticmethod
+    def _extract_header_footer_html(template_html: str) -> Dict[str, str]:
+        """Extract reusable header/footer fragments and their relevant CSS."""
+        empty = {
+            "header_html": "",
+            "header_css": "",
+            "footer_html": "",
+            "footer_css": "",
+        }
+        if not template_html:
+            return empty
+
+        try:
+            soup = BeautifulSoup(str(template_html), "html.parser")
+        except Exception:
+            logger.exception("Unable to parse template HTML for locked zones")
+            return empty
+
+        header = soup.select_one(
+            ".slide-header, .page-header, .header, header, [data-role='header']"
+        )
+        footer = soup.select_one(
+            ".slide-footer, .page-footer, .footer, footer, [data-role='footer']"
+        )
+        if header is None:
+            marker = soup.find(string=re.compile(r"main_heading|slide_title|page_title"))
+            if marker is not None:
+                header = marker.parent
+        if footer is None:
+            marker = soup.find(
+                string=re.compile(r"current_page_number|total_page_count|page_number")
+            )
+            if marker is not None:
+                footer = marker.parent
+
+        style_text = "\n".join(style.get_text("\n") for style in soup.find_all("style"))
+
+        def _classes(node) -> set[str]:
+            if node is None:
+                return set()
+            values: set[str] = set()
+            for element in [node, *node.find_all(True)]:
+                values.update(str(item) for item in (element.get("class") or []))
+            return values
+
+        def _matching_css(node) -> str:
+            classes = _classes(node)
+            if not classes or not style_text:
+                return ""
+            rules = []
+            for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", style_text):
+                if any(f".{class_name}" in selector for class_name in classes):
+                    rules.append(f"{selector.strip()} {{{body.strip()}}}")
+            return "\n".join(rules)
+
+        return {
+            "header_html": str(header) if header is not None else "",
+            "header_css": _matching_css(header),
+            "footer_html": str(footer) if footer is not None else "",
+            "footer_css": _matching_css(footer),
+        }
+
+    @staticmethod
     def _build_locked_zones_context(template_html: str, page_number: int,
                                      total_pages: int, slide_type: str,
                                      slide_title: str = "") -> str:
@@ -198,10 +271,37 @@ class DesignPrompts:
         if is_first or is_last or is_catalog or not template_html:
             return ""
 
-        return """
+        zones = DesignPrompts._extract_header_footer_html(template_html)
+        anchor_hint = "请结合模板 HTML 原文，自行识别标题区、页码区和其他稳定锚点。"
+        if not zones["header_html"] and not zones["footer_html"]:
+            return f"""
 **稳定区域理解方向**
-结合上方模板 HTML 原文，自行识别标题区、页码区和其他稳定锚点。
-普通内容页更适合沿用这些区域的层级、位置关系和语气，只在主内容区重新组织信息。
+**母板锁定区提示**
+未能从模板中精确提取 Header 或 Footer。{anchor_hint}
+普通内容页应沿用这些区域的层级、位置关系和语气，只在主内容区重新组织信息。
+""".strip()
+
+        return f"""
+**稳定区域理解方向**
+**母板锁定区**
+以下结构是从模板原文提取的稳定锚点。{anchor_hint}
+普通内容页应保留其语义、层级和位置关系，只在主内容区重新组织信息。
+
+**Header 锁定结构**
+```html
+{zones['header_html']}
+```
+```css
+{zones['header_css']}
+```
+
+**Footer 锁定结构**
+```html
+{zones['footer_html']}
+```
+```css
+{zones['footer_css']}
+```
 """.strip()
 
     @staticmethod
@@ -514,6 +614,7 @@ composition_brief 的六个字段均为非空字符串：
 - 根据标题长度、要点数量、是否含图表/表格/时间线等，判断适合放大焦点、保持均衡还是压缩收敛
 - 从版式工具箱中选择最合适的方法，转化为可执行建议
 - 即使内容项数量对等，也主动建立视觉层次
+- 避免推荐四宫格等均质化布局；即使当前页内容天然四等分且主次关系一致，也必须主动建立视觉层次，不能做成均质排布
 - 给出方向和关系，让生成器根据内容自行推导
 
 请按以下结构输出：
@@ -779,7 +880,7 @@ composition_brief 的六个字段均为非空字符串：
 - 标题区和页码区作为母板锚定区，创意主要发生在主内容区。
 - 页码锚点优先跟随模板原有位置。
 - 吸收页面指导的方向建议，但可根据内容自由选择实现方式。
-- 在单一主任务前提下展开要点；信息已足够时优先精简或聚焦，而不是再叠加视觉模块。
+- 在单一主任务前提下展开要点，把每组相关内容组织为完整信息单元；信息已足够时优先精简或聚焦，而不是再叠加视觉模块。
 """
         return DesignPrompts._finalize_prompt(prompt, {"include_page_numbers": include_page_numbers})
 

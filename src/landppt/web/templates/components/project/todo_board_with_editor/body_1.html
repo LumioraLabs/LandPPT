@@ -267,7 +267,8 @@
             <button class="close-fullscreen" id="closeFullscreenBtn">
                 <i class="fas fa-times"></i>
             </button>
-            <iframe class="fullscreen-iframe" id="fullscreenIframe" src=""></iframe>
+            <iframe class="fullscreen-iframe" id="fullscreenIframe" src="" sandbox="allow-same-origin"
+                referrerpolicy="no-referrer"></iframe>
         </div>
     </div>
 
@@ -389,7 +390,8 @@
                                 <!-- Preview container -->
                                 <div id="freeTemplatePreviewContainer" class="ftm-preview-wrap"
                                      onclick="openFreeTemplateFullscreen()" title="点击全屏预览">
-                                    <iframe id="freeTemplatePreviewIframe"></iframe>
+                                    <iframe id="freeTemplatePreviewIframe" sandbox="allow-same-origin"
+                                        referrerpolicy="no-referrer"></iframe>
                                 </div>
 
                                 <!-- Code editor container -->
@@ -494,7 +496,8 @@
     <!-- Free Template Fullscreen Overlay -->
     <div id="freeTemplateFullscreenOverlay" class="ftm-fullscreen">
         <div class="ftm-fullscreen-frame">
-            <iframe id="freeTemplateFullscreenIframe" style="width:100%; height:100%; border:0;"></iframe>
+            <iframe id="freeTemplateFullscreenIframe" sandbox="allow-same-origin"
+                referrerpolicy="no-referrer" style="width:100%; height:100%; border:0;"></iframe>
         </div>
         <button onclick="closeFreeTemplateFullscreen()" class="ftm-fullscreen-close">
             <i class="fas fa-times"></i>
@@ -503,4 +506,3 @@
             按 <kbd>ESC</kbd> 或点击 <kbd>&times;</kbd> 退出全屏
         </div>
     </div>
-

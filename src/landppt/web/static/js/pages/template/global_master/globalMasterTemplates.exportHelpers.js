@@ -164,6 +164,8 @@ function renderTemplateSampleHtml(htmlTemplate, sampleSlide, pageNumber, totalPa
 }
 
 async function loadHtmlIntoIframe(iframe, html) {
+    iframe.setAttribute('sandbox', 'allow-same-origin');
+    iframe.setAttribute('referrerpolicy', 'no-referrer');
     return new Promise((resolve, reject) => {
         let done = false;
         const finish = (ok, err) => {

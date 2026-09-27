@@ -250,6 +250,7 @@ class TemplatePrompts:
     def get_template_generation_creative_prompt_text() -> str:
         """母版创意愿景，以正面驱动替代负面禁令。"""
         return """
+**创意要求**
 **创意愿景——单页母版**
 - 在一个 HTML 文件中只输出一个通用页面模板，形成可复用的视觉语言系统。
 - 模板需要兼容封面、目录、过渡、内容、标题、结尾等不同实际页面的内容替换，但不要分别生成页面类型变体。
@@ -326,7 +327,7 @@ class TemplatePrompts:
 
 {TemplatePrompts.get_template_generation_requirements_prompt_text(include_page_numbers=include_page_numbers)}
 
-直接输出完整的单页母版 HTML（只包含一个通用 1280×720 页面模板），使用```html```代码块返回，不要附加解释。
+直接输出完整 HTML 模板（只包含一个通用 1280×720 页面模板），使用```html```代码块返回，不要附加解释。
 """.strip()
         return apply_page_number_prompt_filter(
             prompt,

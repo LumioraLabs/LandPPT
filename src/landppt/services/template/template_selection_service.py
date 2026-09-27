@@ -348,6 +348,43 @@ class TemplateSelectionService:
                 "selected_template": None,
             }
 
+    async def _generate_missing_free_template(
+        self,
+        project_id: str,
+        project: Any,
+        project_metadata: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Generate and persist a free template when selection finds none stored."""
+        outline = project.outline or {}
+        confirmed = project.confirmed_requirements or {}
+        free_prompt = self._build_free_template_prompt(project, outline, confirmed)
+        template_name = f"自由模板-{str(project_id)[:8]}"
+        generated = await self.global_template_service.generate_template_with_ai(
+            prompt=free_prompt,
+            template_name=template_name,
+            description="AI 根据大纲自动生成的项目专属模板",
+            tags=["自由模板", "AI生成", "项目专属"],
+            generation_mode="text_only",
+            prompt_is_ready=True,
+        )
+        if not isinstance(generated, dict):
+            return None
+        html_template = generated.get("html_template")
+        if not isinstance(html_template, str) or not html_template.strip():
+            return None
+        final_name = generated.get("template_name") or template_name
+        updated = dict(project_metadata)
+        updated["template_mode"] = "free"
+        updated["free_template_html"] = html_template
+        updated["free_template_name"] = final_name
+        updated["free_template_prompt"] = free_prompt
+        updated["free_template_status"] = "ready"
+        updated["free_template_generated_at"] = time.time()
+        updated.pop("free_template_error", None)
+        await self.project_manager.update_project_metadata(project_id, updated)
+        self.clear_cached_style_genes(project_id)
+        return self._build_free_template_payload(final_name, html_template)
+
     async def get_selected_global_template(
         self,
         project_id: str,
@@ -369,7 +406,7 @@ class TemplateSelectionService:
                 if free_html and isinstance(free_html, str) and free_html.strip():
                     return self._build_free_template_payload(free_name, free_html)
 
-                return None
+                return await self._generate_missing_free_template(project_id, project, project_metadata)
 
             selected_template_id = project_metadata.get("selected_global_template_id")
             if selected_template_id:

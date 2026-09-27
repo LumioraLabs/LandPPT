@@ -206,6 +206,8 @@ function buildTemplateCard(template) {
                 class="template-preview-iframe"
                 title="${template.template_name}"
                 data-template-id="${template.id}"
+                sandbox="allow-same-origin"
+                referrerpolicy="no-referrer"
                 loading="lazy"
             ></iframe>
             <div class="preview-overlay" data-action="preview" data-template-id="${template.id}" title="点击查看完整预览">

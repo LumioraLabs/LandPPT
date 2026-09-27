@@ -37,11 +37,15 @@ from ...utils.thread_pool import run_blocking_io, to_thread
 from ..responses import ClosingStreamingResponse
 from .support import (
     _apply_no_store_headers,
+    billable_operation_id,
+    billable_work_may_start,
     check_credits_for_operation,
-    consume_credits_for_operation,
+    commit_billable_operation,
     get_ppt_service_for_user,
     logger,
     ppt_service,
+    release_billable_operation,
+    reserve_billable_operation,
     templates,
 )
 
@@ -175,6 +179,7 @@ async def _do_batch_regenerate(
         progress_callback: Optional async/sync callable(completed: int, total: int)
             invoked after each slide finishes generation.
     """
+    reservation_id = None
     try:
         user_ppt_service = get_ppt_service_for_user(user.id)
         project = await user_ppt_service.project_manager.get_project(project_id, user_id=user.id)
@@ -287,6 +292,36 @@ async def _do_batch_regenerate(
                 "success": False,
                 "error": f"积分不足，批量幻灯片重新生成需要 {required} 积分，当前余额 {balance} 积分",
             }
+
+        reservation_id = billable_operation_id(
+            "slide-batch",
+            project_id,
+            ",".join(str(index) for index in target_indices),
+        )
+        reserved, reserve_message, reserve_state = await reserve_billable_operation(
+            user.id,
+            reservation_id,
+            "slide_generation",
+            len(target_indices),
+            reference_id=project_id,
+            provider_name=slide_provider_name,
+        )
+        if not billable_work_may_start(reserve_state):
+            reservation_id = None
+            if reserve_state == "committed":
+                return {
+                    "success": True,
+                    "updated_count": 0,
+                    "total_requested": len(target_indices),
+                    "already_completed": True,
+                }
+            return {
+                "success": False,
+                "error": reserve_message,
+                "in_progress": reserve_state == "reserved",
+            }
+        if reserve_state != "created":
+            reservation_id = None
 
         # Prepare generation context once.
         system_prompt = user_ppt_service._load_prompts_md_system_prompt()
@@ -421,15 +456,9 @@ async def _do_batch_regenerate(
 
         updated_count = persisted_count
 
-        if updated_count > 0:
-            await consume_credits_for_operation(
-                user.id,
-                "slide_generation",
-                updated_count,
-                description=f"批量幻灯片重新生成: {updated_count}页",
-                reference_id=project_id,
-                provider_name=slide_provider_name,
-            )
+        if reservation_id:
+            await commit_billable_operation(reservation_id, updated_count)
+            reservation_id = None
 
         response = {
             "success": updated_count > 0,
@@ -443,9 +472,17 @@ async def _do_batch_regenerate(
             response["error"] = f"部分幻灯片保存失败：{persist_error}"
         return response
 
+    except asyncio.CancelledError:
+        if reservation_id:
+            await release_billable_operation(reservation_id, "cancelled")
+        raise
     except HTTPException:
+        if reservation_id:
+            await release_billable_operation(reservation_id, "cancelled")
         raise
     except Exception as e:
+        if reservation_id:
+            await release_billable_operation(reservation_id, "failure")
         return {"success": False, "error": str(e)}
 
 

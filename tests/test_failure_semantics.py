@@ -107,8 +107,9 @@ class TestSlideFailuresAreNotBilledOrCompleted:
 
     def test_billing_quantity_uses_generated_only(self):
         source = _read("services/slide/slide_generation_service.py")
-        assert "quantity=len(generated_slide_indices)" in source
-        assert "quantity=len(failed_slide_indices)" not in source
+        commit = source[source.index("commit_reservation(") :][:300]
+        assert "len(generated_slide_indices)" in commit
+        assert "failed_slide_indices" not in commit
 
     def test_stage_is_not_completed_when_pages_failed(self):
         source = _read("services/slide/slide_generation_service.py")

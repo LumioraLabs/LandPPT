@@ -329,6 +329,11 @@ function setSafeIframeContent(iframe, html, options = {}) {
         return;
     }
 
+    // Slide HTML is generated/imported content. Keep it readable by editor
+    // tooling, but never permit embedded scripts, forms, popups, or navigation.
+    iframe.setAttribute('sandbox', 'allow-same-origin');
+    iframe.setAttribute('referrerpolicy', 'no-referrer');
+
     const preparedHtml = prepareHtmlForPreview(html);
 
     if (!force && iframe.getAttribute('data-current-content') === preparedHtml) {

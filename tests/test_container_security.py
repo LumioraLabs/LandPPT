@@ -556,7 +556,6 @@ def test_helm_defaults_enforce_non_root_identity_and_volume_group():
     [
         "helm/landppt/templates/deployment.yaml",
         "helm/landppt/templates/worker-deployment.yaml",
-        "helm/landppt/templates/migration-job.yaml",
     ],
 )
 def test_helm_workloads_render_pod_and_container_security_contexts(
@@ -566,6 +565,12 @@ def test_helm_workloads_render_pod_and_container_security_contexts(
 
     assert "{{- with .Values.podSecurityContext }}" in template
     assert "{{- with .Values.securityContext }}" in template
+
+
+def test_migrate_init_container_renders_container_security_context():
+    helper = read_repo_file("helm/landppt/templates/_helpers.tpl")
+    migrate = helper.split('define "landppt.migrateInitContainer"', 1)[1]
+    assert "{{- with .Values.securityContext }}" in migrate
 
 
 def test_helm_web_update_strategy_supports_zero_unavailable_rollouts():

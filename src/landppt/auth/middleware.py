@@ -13,6 +13,7 @@ from ..database.database import get_db
 from ..database.models import User
 from ..core.config import app_config
 from .request_context import current_base_url, current_user_id, resolve_request_base_url
+from .cookies import clear_session_cookie
 
 logger = logging.getLogger(__name__)
 
@@ -59,14 +60,14 @@ def _extract_session_id(request: Request) -> Optional[str]:
 
 class AuthMiddleware:
     """Authentication middleware"""
-    
+
     def __init__(self):
         self.auth_service = get_auth_service()
         # 不需要认证的路径
         self.public_paths = {
             "/",
             "/health",
-            "/metrics",
+            "/ready",
             "/auth/login",
             "/auth/logout",
             "/auth/github/login",
@@ -82,8 +83,9 @@ class AuthMiddleware:
             "/api/auth/login",
             "/api/auth/logout",
             "/api/auth/check",
+            "/billing/webhooks/stripe",
             "/static",
-            "/favicon.ico"
+            "/favicon.ico",
         }
 
         # 不需要认证的路径前缀
@@ -95,18 +97,18 @@ class AuthMiddleware:
             "/share/",  # 公开分享链接无需认证
             "/api/share/",  # 分享API无需认证
         ]
-    
+
     def is_public_path(self, path: str) -> bool:
         """Check if path is public (doesn't require authentication)"""
         # Check exact matches
         if path in self.public_paths:
             return True
-        
+
         # Check prefixes
         for prefix in self.public_prefixes:
             if path.startswith(prefix):
                 return True
-        
+
         return False
 
     def should_resolve_optional_user(self, path: str) -> bool:
@@ -114,7 +116,7 @@ class AuthMiddleware:
         if _is_api_path(path):
             return False
 
-        if path == "/favicon.ico":
+        if path in {"/favicon.ico", "/ready"}:
             return False
 
         return not path.startswith(("/static/", "/temp/"))
@@ -133,7 +135,9 @@ class AuthMiddleware:
 
         return None
 
-    async def _get_user_from_session_cache(self, session_id: Optional[str]) -> Optional[User]:
+    async def _get_user_from_session_cache(
+        self, session_id: Optional[str]
+    ) -> Optional[User]:
         """Resolve a user from cached session state without touching the database."""
         normalized_session_id = str(session_id or "").strip()
         if not normalized_session_id:
@@ -153,13 +157,17 @@ class AuthMiddleware:
                     await cache.delete_session(normalized_session_id)
                 return None
 
-            ttl = self.auth_service.get_session_cache_ttl((payload or {}).get("expires_at"))
+            ttl = self.auth_service.get_session_cache_ttl(
+                (payload or {}).get("expires_at")
+            )
             await cache.refresh_session(normalized_session_id, ttl=ttl)
             return user
         except Exception as exc:
-            logger.debug("Session cache lookup failed for %s: %s", normalized_session_id, exc)
+            logger.debug(
+                "Session cache lookup failed for %s: %s", normalized_session_id, exc
+            )
             return None
-    
+
     async def __call__(self, request: Request, call_next: Callable):
         """Middleware function"""
         # Ensure request-scoped user context is always initialized/reset
@@ -190,7 +198,9 @@ class AuthMiddleware:
                             user: Optional[User] = None
                             session_id = _extract_session_id(request)
                             if session_id:
-                                user = await self._get_user_from_session_cache(session_id)
+                                user = await self._get_user_from_session_cache(
+                                    session_id
+                                )
 
                             if not user:
                                 user = self._resolve_request_user(request, ensure_db())
@@ -203,7 +213,11 @@ class AuthMiddleware:
                                 db.close()
                     except Exception as exc:
                         # 公开页不应因可选登录态识别失败而中断访问。
-                        logger.debug("Optional auth resolution failed for public path %s: %s", path, exc)
+                        logger.debug(
+                            "Optional auth resolution failed for public path %s: %s",
+                            path,
+                            exc,
+                        )
 
                 response = await call_next(request)
                 return response
@@ -234,13 +248,15 @@ class AuthMiddleware:
                             return Response(
                                 content='{"detail": "Authentication required"}',
                                 status_code=401,
-                                media_type="application/json"
+                                media_type="application/json",
                             )
                         else:
-                            response = RedirectResponse(url="/auth/login", status_code=302)
+                            response = RedirectResponse(
+                                url="/auth/login", status_code=302
+                            )
                             # If cookie-based session is present but invalid, clear it.
                             if session_cookie:
-                                response.delete_cookie("session_id")
+                                clear_session_cookie(response)
                             return response
 
                     # Add user to request state and request context
@@ -261,7 +277,7 @@ class AuthMiddleware:
                     return Response(
                         content='{"detail": "Authentication error"}',
                         status_code=500,
-                        media_type="application/json"
+                        media_type="application/json",
                     )
                 else:
                     return RedirectResponse(url="/auth/login", status_code=302)
@@ -272,7 +288,7 @@ class AuthMiddleware:
 
 def get_current_user(request: Request) -> Optional[User]:
     """Get current authenticated user from request"""
-    return getattr(request.state, 'user', None)
+    return getattr(request.state, "user", None)
 
 
 def require_auth(request: Request) -> User:
@@ -292,8 +308,7 @@ def require_admin(request: Request) -> User:
 
 
 def get_current_user_optional(
-    request: Request,
-    db: Session = Depends(get_db)
+    request: Request, db: Session = Depends(get_db)
 ) -> Optional[User]:
     """
     Get current user if authenticated, None otherwise.
@@ -325,10 +340,7 @@ def get_current_user_optional(
     return user
 
 
-def get_current_user_required(
-    request: Request,
-    db: Session = Depends(get_db)
-) -> User:
+def get_current_user_required(request: Request, db: Session = Depends(get_db)) -> User:
     """
     Get current user, raise exception if not authenticated.
     For use with FastAPI dependency injection.
@@ -339,10 +351,7 @@ def get_current_user_required(
     return user
 
 
-def get_current_admin_user(
-    request: Request,
-    db: Session = Depends(get_db)
-) -> User:
+def get_current_admin_user(request: Request, db: Session = Depends(get_db)) -> User:
     """
     Get current admin user, raise exception if not admin.
     For use with FastAPI dependency injection.

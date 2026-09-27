@@ -35,11 +35,14 @@ from ...services.runtime.ai_execution import scoped_ai_conversation
 from ...utils.thread_pool import run_blocking_io, to_thread
 from .support import (
     _apply_no_store_headers,
+    acquire_billable_hold,
+    billable_operation_id,
     check_credits_for_operation,
-    consume_credits_for_operation,
+    commit_billable_operation,
     get_ppt_service_for_user,
     logger,
     ppt_service,
+    release_billable_operation,
     templates,
 )
 
@@ -168,6 +171,28 @@ async def generate_speech_script(
                 "error": f"积分不足，演讲稿生成需要 {required} 积分，当前余额 {balance} 积分",
             }
 
+        speech_operation_id = billable_operation_id(
+            "speech-script",
+            project_id,
+            request.generation_type,
+            ",".join(str(index) for index in slide_indices),
+        )
+        proceed, reserve_message, reserve_state, speech_owned = await acquire_billable_hold(
+            user.id,
+            speech_operation_id,
+            "ai_other",
+            len(slide_indices),
+            reference_id=project_id,
+            provider_name=speech_provider_name,
+        )
+        if not proceed:
+            return {
+                "success": reserve_state == "committed",
+                "already_completed": reserve_state == "committed",
+                "in_progress": reserve_state == "reserved",
+                "error": reserve_message,
+            }
+
         from ...services.progress_tracker import progress_tracker
         await progress_tracker.create_task_async(
             task_id=task_id,
@@ -234,26 +259,25 @@ async def generate_speech_script(
                     repo.close()
                     logger.info(f"All {saved_count} scripts saved and committed to database for task {task_id}")
 
-                    if saved_count > 0:
-                        billed, bill_message = await consume_credits_for_operation(
-                            user.id,
-                            "ai_other",
-                            saved_count,
-                            description=f"演讲稿生成: {saved_count}页",
-                            reference_id=project_id,
-                            provider_name=speech_provider_name,
-                        )
-                        if not billed and _is_billable_provider(speech_provider_name):
-                            logger.error(f"Speech script billing failed for task {task_id}: {bill_message}")
+                    if speech_owned:
+                        await commit_billable_operation(speech_owned, saved_count)
 
                     # NOW mark the task as completed after database save
                     await progress_tracker.complete_task_async(task_id, f"生成完成！成功 {saved_count} 页")
                     logger.info(f"Task {task_id} marked as completed")
                 else:
+                    if speech_owned:
+                        await release_billable_operation(speech_owned, "failure")
                     logger.error(f"Generation failed for task {task_id}: {result.error_message}")
                     await progress_tracker.fail_task_async(task_id, result.error_message or "生成失败")
 
+            except asyncio.CancelledError:
+                if speech_owned:
+                    await release_billable_operation(speech_owned, "cancelled")
+                raise
             except Exception as e:
+                if speech_owned:
+                    await release_billable_operation(speech_owned, "failure")
                 logger.error(f"Async speech script generation failed for task {task_id}: {e}")
                 await progress_tracker.fail_task_async(task_id, str(e))
 
@@ -532,6 +556,28 @@ async def humanize_speech_scripts(
                 "error": f"积分不足，演讲稿一键人话需要 {required} 积分，当前余额 {balance} 积分",
             }
 
+        humanize_operation_id = billable_operation_id(
+            "speech-humanize",
+            project_id,
+            requested_language,
+            ",".join(str(item.slide_index) for item in normalized_items),
+        )
+        proceed, reserve_message, reserve_state, humanize_owned = await acquire_billable_hold(
+            user_id,
+            humanize_operation_id,
+            "ai_other",
+            len(normalized_items),
+            reference_id=project_id,
+            provider_name=speech_provider_name,
+        )
+        if not proceed:
+            return {
+                "success": reserve_state == "committed",
+                "already_completed": reserve_state == "committed",
+                "in_progress": reserve_state == "reserved",
+                "error": reserve_message,
+            }
+
         task_id = str(uuid.uuid4())
         await progress_tracker.create_task_async(
             task_id=task_id,
@@ -653,6 +699,8 @@ async def humanize_speech_scripts(
                         )
 
                 if not updated_scripts:
+                    if humanize_owned:
+                        await release_billable_operation(humanize_owned, "failure")
                     if repo and repo.db:
                         repo.db.rollback()
                     await progress_tracker.fail_task_async(
@@ -663,26 +711,20 @@ async def humanize_speech_scripts(
 
                 repo.db.commit()
 
-                billed, bill_message = await consume_credits_for_operation(
-                    user_id,
-                    "ai_other",
-                    len(updated_scripts),
-                    description=f"演讲稿一键人话: {len(updated_scripts)}页",
-                    reference_id=project_id,
-                    provider_name=speech_provider_name,
-                )
-                if not billed and _is_billable_provider(speech_provider_name):
-                    logger.error(
-                        "Speech script humanize billing failed for project %s: %s",
-                        project_id,
-                        bill_message,
-                    )
+                if humanize_owned:
+                    await commit_billable_operation(humanize_owned, len(updated_scripts))
 
                 message = f"一键人话完成！成功 {len(updated_scripts)} 页"
                 if failed_slides:
                     message += f"，失败 {len(failed_slides)} 页"
                 await progress_tracker.complete_task_async(task_id, message)
+            except asyncio.CancelledError:
+                if humanize_owned:
+                    await release_billable_operation(humanize_owned, "cancelled")
+                raise
             except Exception as e:
+                if humanize_owned:
+                    await release_billable_operation(humanize_owned, "failure")
                 if repo and repo.db:
                     repo.db.rollback()
                 logger.error(f"Humanize speech scripts async task failed: {e}")

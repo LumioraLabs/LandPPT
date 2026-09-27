@@ -204,6 +204,31 @@
         font-size: 0.9rem;
     }
 
+    .purchase-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+        gap: 12px;
+    }
+
+    .purchase-card {
+        display: grid;
+        gap: 10px;
+        padding: 16px;
+        border: 1px solid var(--border-color);
+        border-radius: var(--border-radius-lg);
+        background: var(--surface-subtle);
+    }
+
+    .purchase-card strong {
+        font-size: 1.05rem;
+    }
+
+    .purchase-price {
+        color: var(--ink-strong);
+        font-size: 1.25rem;
+        font-weight: 900;
+    }
+
     .checkin-panel {
         display: flex;
         justify-content: space-between;
@@ -394,6 +419,16 @@
         </div>
     </div>
 
+    <div class="credits-section" id="purchaseSection" hidden>
+        <div class="credits-section-header">
+            <h3><i class="fas fa-credit-card"></i> 购买积分</h3>
+            <span class="muted">由 Stripe 安全处理付款</span>
+        </div>
+        <div class="credits-section-body">
+            <div class="purchase-grid" id="purchaseGrid"></div>
+        </div>
+    </div>
+
     <div class="credits-grid">
         <div class="credits-section">
             <div class="credits-section-header">
@@ -493,6 +528,104 @@
         } catch (e) {
             showAlert('加载计费参考失败', 'error');
         }
+    }
+
+    function formatMoney(amountMinor, currency) {
+        return new Intl.NumberFormat(undefined, {
+            style: 'currency',
+            currency: String(currency || 'usd').toUpperCase()
+        }).format(Number(amountMinor) / 100);
+    }
+
+    async function loadPurchasePacks() {
+        try {
+            const res = await fetch('/billing/api/packages');
+            const data = await res.json();
+            if (!res.ok || !data.enabled || !data.packages.length) return;
+            const grid = document.getElementById('purchaseGrid');
+            grid.replaceChildren();
+            for (const pack of data.packages) {
+                const card = document.createElement('div');
+                card.className = 'purchase-card';
+                const name = document.createElement('strong');
+                name.textContent = pack.name;
+                const credits = document.createElement('div');
+                credits.className = 'muted';
+                credits.textContent = `${pack.credits} 积分`;
+                const price = document.createElement('div');
+                price.className = 'purchase-price';
+                price.textContent = formatMoney(pack.amount_minor, pack.currency);
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'btn btn-primary';
+                button.innerHTML = '<i class="fas fa-lock"></i> 安全结账';
+                button.addEventListener('click', () => startCheckout(pack.id, button));
+                card.append(name, credits, price, button);
+                grid.append(card);
+            }
+            document.getElementById('purchaseSection').hidden = false;
+        } catch (e) {
+            console.warn('Unable to load billing packages', e);
+        }
+    }
+
+    async function startCheckout(packId, button) {
+        const previous = button.innerHTML;
+        button.disabled = true;
+        button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 正在打开结账...';
+        try {
+            const idempotencyKey = crypto.randomUUID();
+            const res = await fetch('/billing/api/checkout', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Idempotency-Key': idempotencyKey
+                },
+                body: JSON.stringify({ pack_id: packId })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || '暂时无法发起付款');
+            sessionStorage.setItem('landpptPendingPaymentOrder', data.order_id);
+            window.location.assign(data.checkout_url);
+        } catch (e) {
+            showAlert(e.message || '暂时无法发起付款', 'error');
+            button.disabled = false;
+            button.innerHTML = previous;
+        }
+    }
+
+    async function handleCheckoutReturn() {
+        const params = new URLSearchParams(window.location.search);
+        const state = params.get('checkout');
+        if (state === 'cancelled') {
+            showAlert('付款已取消，未扣款。', 'error');
+            return;
+        }
+        if (state !== 'success') return;
+        const orderId = sessionStorage.getItem('landpptPendingPaymentOrder');
+        if (!orderId) {
+            showAlert('付款已提交，积分将在确认后自动到账。', 'success');
+            return;
+        }
+        for (let attempt = 0; attempt < 8; attempt += 1) {
+            const res = await fetch(`/billing/api/orders/${encodeURIComponent(orderId)}`);
+            if (res.ok) {
+                const order = await res.json();
+                if (order.status === 'fulfilled') {
+                    sessionStorage.removeItem('landpptPendingPaymentOrder');
+                    showAlert('付款成功，积分已到账。', 'success');
+                    loadStats();
+                    loadTransactions(1);
+                    return;
+                }
+                if (['payment_failed', 'expired', 'refunded'].includes(order.status)) {
+                    showAlert(`付款状态：${order.status}`, 'error');
+                    return;
+                }
+            }
+            await new Promise(resolve => setTimeout(resolve, 1500));
+        }
+        showAlert('付款已提交，积分将在确认后自动到账。', 'success');
     }
 
     async function loadTransactions(page = 1) {
@@ -674,6 +807,8 @@
     loadStats();
     loadCheckinStatus();
     loadPricing();
+    loadPurchasePacks();
     loadTransactions();
+    handleCheckoutReturn();
 </script>
 {% endblock %}

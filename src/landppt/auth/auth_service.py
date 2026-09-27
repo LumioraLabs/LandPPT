@@ -13,6 +13,11 @@ from sqlalchemy import and_
 
 from ..database.models import User, UserSession, UserAPIKey
 from ..core.config import app_config
+from .passwords import (
+    hash_password as secure_hash_password,
+    password_hash_needs_update,
+    verify_password as secure_verify_password,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +28,6 @@ class AuthService:
     SESSION_CACHE_USER_FIELDS = (
         "id",
         "username",
-        "password_hash",
         "email",
         "phone",
         "avatar",
@@ -85,7 +89,9 @@ class AuthService:
 
         user = User(
             username=username,
-            password_hash=str(payload.get("password_hash") or ""),
+            # Password-derived material must never be copied into the shared
+            # session cache.  Credential checks always reload the DB user.
+            password_hash="",
             email=payload.get("email"),
             phone=payload.get("phone"),
             avatar=payload.get("avatar"),
@@ -235,9 +241,10 @@ class AuthService:
                 raise ValueError("邮箱已存在")
         
         # Get default credits for new users if credits system is enabled
-        default_credits = 0
-        if app_config.enable_credits_system:
-            default_credits = app_config.default_credits_for_new_users
+        # Persist the configured signup grant even when credit enforcement is
+        # temporarily disabled, so enabling billing later does not create a
+        # different starting balance for otherwise equivalent accounts.
+        default_credits = app_config.default_credits_for_new_users
         
         # Create new user
         user = User(
@@ -265,6 +272,10 @@ class AuthService:
         ).first()
         
         if user and user.check_password(password):
+            # Transparently replace legacy SHA-256 hashes (or hashes with an
+            # obsolete work factor) after the credential has been verified.
+            if password_hash_needs_update(user.password_hash):
+                user.set_password(password)
             # Update last login time
             user.last_login = time.time()
             db.commit()
@@ -573,12 +584,16 @@ class AuthService:
         ).first()
     
     def update_user_password(self, db: Session, user: User, new_password: str) -> bool:
-        """Update user password"""
+        """Update a password and revoke every existing browser session."""
         try:
             target = db.query(User).filter(User.id == user.id).first()
             if not target:
                 return False
             target.set_password(new_password)
+            db.query(UserSession).filter(
+                UserSession.user_id == target.id,
+                UserSession.is_active == True,
+            ).update({UserSession.is_active: False}, synchronize_session=False)
             db.commit()
             self._schedule_user_sessions_cache_invalidation(target.id)
             return True
@@ -658,10 +673,10 @@ def init_default_admin(db: Session) -> None:
 
 
 def hash_password(password: str) -> str:
-    """Hash password using SHA256"""
-    return hashlib.sha256(password.encode()).hexdigest()
+    """Backward-compatible public password hashing helper."""
+    return secure_hash_password(password)
 
 
 def verify_password(password: str, hashed: str) -> bool:
-    """Verify password against hash"""
-    return hash_password(password) == hashed
+    """Backward-compatible public password verification helper."""
+    return secure_verify_password(password, hashed)

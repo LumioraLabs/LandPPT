@@ -4,6 +4,7 @@ Outline generation routes extracted from the outline router.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from contextlib import aclosing
@@ -17,15 +18,20 @@ from ..responses import ClosingStreamingResponse
 from .outline_support import (
     _extract_saved_file_outline,
     _is_billable_provider,
+    _outline_reservation_quantity,
     _resolve_outline_llm_call_count,
     _stream_outline_from_confirmed_sources_v2,
 )
 from .support import (
+    billable_operation_id,
+    billable_work_may_start,
     check_credits_for_operation,
-    consume_credits_for_operation,
+    commit_billable_operation,
     get_ppt_service_for_user,
     logger,
     ppt_service,
+    release_billable_operation,
+    reserve_billable_operation,
 )
 
 router = APIRouter()
@@ -97,6 +103,31 @@ async def stream_outline_generation(
                 },
             )
 
+        outline_operation_id = billable_operation_id(
+            "outline-stream", project_id, str(bool(force_regenerate))
+        )
+        outline_hold = _outline_reservation_quantity(confirmed_requirements)
+        reserved_ok, reserve_message, reserve_state = await reserve_billable_operation(
+            user.id,
+            outline_operation_id,
+            "outline_generation",
+            outline_hold,
+            reference_id=project_id,
+            provider_name=outline_provider_name,
+        )
+        if not reserved_ok or not billable_work_may_start(reserve_state):
+            async def generate_blocked():
+                yield f"data: {json.dumps({'error': reserve_message, 'in_progress': reserve_state == 'reserved', 'already_completed': reserve_state == 'committed'}, ensure_ascii=False)}\n\n"
+
+            return ClosingStreamingResponse(
+                generate_blocked(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache, no-transform",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
         async def generate():
             billed = False
             content_source = confirmed_requirements.get("content_source")
@@ -150,25 +181,27 @@ async def stream_outline_generation(
                                 except Exception:
                                     continue
                                 if payload.get("done") is True:
-                                    billed = True
                                     llm_call_count = payload.get("llm_call_count", 1)
                                     try:
                                         llm_call_count = max(0, int(llm_call_count))
                                     except Exception:
                                         llm_call_count = 1
 
-                                    if llm_call_count > 0:
-                                        await consume_credits_for_operation(
-                                            user.id,
-                                            "outline_generation",
-                                            llm_call_count,
-                                            description=f"大纲生成(流式): {project.topic}",
-                                            reference_id=project_id,
-                                            provider_name=outline_provider_name,
+                                    if reserve_state == "created":
+                                        await commit_billable_operation(
+                                            outline_operation_id,
+                                            min(outline_hold, max(0, llm_call_count)),
                                         )
+                                        billed = True
                         yield chunk
+            except asyncio.CancelledError:
+                if reserve_state == "created" and not billed:
+                    await release_billable_operation(outline_operation_id, "cancelled")
+                raise
             except Exception as e:
                 import json
+                if reserve_state == "created" and not billed:
+                    await release_billable_operation(outline_operation_id, "failure")
                 # Record the failure: leaving the stage "running" made the todo board
                 # spin forever with no error and no retry affordance.
                 try:
@@ -258,8 +291,37 @@ async def generate_outline(
         # Extract page count settings from confirmed requirements
         page_count_settings = confirmed_requirements.get('page_count_settings', {})
 
+        outline_operation_id = billable_operation_id("outline", project_id)
+        outline_hold = _outline_reservation_quantity(confirmed_requirements)
+        reserved_ok, reserve_message, reserve_state = await reserve_billable_operation(
+            user.id,
+            outline_operation_id,
+            "outline_generation",
+            outline_hold,
+            reference_id=project_id,
+            provider_name=outline_provider_name,
+        )
+        if not reserved_ok:
+            return {"status": "error", "error": reserve_message}
+        if not billable_work_may_start(reserve_state):
+            return {
+                "status": "success" if reserve_state == "committed" else "error",
+                "already_completed": reserve_state == "committed",
+                "in_progress": reserve_state == "reserved",
+                "message": reserve_message,
+            }
+
         # Generate outline using AI with page count settings
-        outline = await user_ppt_service.generate_outline(project_request, page_count_settings)
+        try:
+            outline = await user_ppt_service.generate_outline(project_request, page_count_settings)
+        except asyncio.CancelledError:
+            if reserve_state == "created":
+                await release_billable_operation(outline_operation_id, "cancelled")
+            raise
+        except Exception:
+            if reserve_state == "created":
+                await release_billable_operation(outline_operation_id, "failure")
+            raise
 
         # Convert outline to dict format
         outline_dict = {
@@ -279,12 +341,10 @@ async def generate_outline(
         # meant the same file-based outline cost 4 credits via SSE but 1 via this
         # endpoint.
         outline_llm_call_count = _resolve_outline_llm_call_count(outline, default=1)
-        if outline_llm_call_count > 0:
-            await consume_credits_for_operation(
-                user.id, "outline_generation", outline_llm_call_count,
-                description=f"大纲生成: {project.topic}",
-                reference_id=project_id,
-                provider_name=outline_provider_name,
+        if reserve_state == "created":
+            await commit_billable_operation(
+                outline_operation_id,
+                min(outline_hold, max(0, outline_llm_call_count)),
             )
 
         return {
@@ -525,6 +585,8 @@ async def generate_file_outline(
                 logger.info(f"Project {project_id} starting file outline generation")
 
                 # Start file outline generation using summeryfile
+                file_operation_id = None
+                reserve_state = "skipped"
                 try:
                     # Create a request object for file outline generation
                     from ...api.models import FileOutlineGenerationRequest
@@ -606,11 +668,40 @@ async def generate_file_outline(
                                 "error": f"积分不足，大纲生成需要 {required} 积分，当前余额 {balance} 积分"
                             }
 
+                        file_operation_id = billable_operation_id("outline-file", project_id)
+                        file_hold = _outline_reservation_quantity(confirmed_requirements)
+                        reserved_ok, reserve_message, reserve_state = await reserve_billable_operation(
+                            user.id,
+                            file_operation_id,
+                            "outline_generation",
+                            file_hold,
+                            reference_id=project_id,
+                            provider_name=outline_provider_name,
+                        )
+                        if not reserved_ok:
+                            return {"status": "error", "error": reserve_message}
+                        if not billable_work_may_start(reserve_state):
+                            return {
+                                "status": "success" if reserve_state == "committed" else "error",
+                                "already_completed": reserve_state == "committed",
+                                "in_progress": reserve_state == "reserved",
+                                "message": reserve_message,
+                            }
+
                         # Generate outline from file using summeryfile
                         logger.info(
                             f"Calling generate_outline_from_file: filename={file_request.filename}, path={file_request.file_path}, mode={file_request.file_processing_mode}"
                         )
-                        outline_response = await user_ppt_service.generate_outline_from_file(file_request)
+                        try:
+                            outline_response = await user_ppt_service.generate_outline_from_file(file_request)
+                        except asyncio.CancelledError:
+                            if reserve_state == "created":
+                                await release_billable_operation(file_operation_id, "cancelled")
+                            raise
+                        except Exception:
+                            if reserve_state == "created":
+                                await release_billable_operation(file_operation_id, "failure")
+                            raise
 
                         if outline_response.success and outline_response.outline:
                             # Format the generated outline
@@ -626,29 +717,12 @@ async def generate_file_outline(
                             formatted_json = json.dumps(formatted_outline, ensure_ascii=False, indent=2)
 
                             llm_call_count = _resolve_outline_llm_call_count(outline_response, default=1)
-                            if llm_call_count > 0:
-                                has_credits_exact, required_exact, balance_exact = await check_credits_for_operation(
-                                    user.id, "outline_generation", llm_call_count, provider_name=outline_provider_name
+                            if reserve_state == "created":
+                                await commit_billable_operation(
+                                    file_operation_id,
+                                    min(file_hold, max(0, llm_call_count)),
                                 )
-                                if not has_credits_exact:
-                                    return {
-                                        "status": "error",
-                                        "error": f"积分不足，大纲生成需要 {required_exact} 积分，当前余额 {balance_exact} 积分"
-                                    }
-
-                                billed, bill_message = await consume_credits_for_operation(
-                                    user.id,
-                                    "outline_generation",
-                                    llm_call_count,
-                                    description=f"文件大纲生成: {project.topic}",
-                                    reference_id=project_id,
-                                    provider_name=outline_provider_name,
-                                )
-                                if not billed:
-                                    return {
-                                        "status": "error",
-                                        "error": bill_message or "积分扣费失败"
-                                    }
+                                reserve_state = "committed"
 
                             # Update outline generation stage
                             await user_ppt_service._update_outline_generation_stage(project_id, formatted_outline)
@@ -659,6 +733,9 @@ async def generate_file_outline(
                                 "message": "File outline generated successfully"
                             }
                         else:
+                            if reserve_state == "created" and file_operation_id:
+                                await release_billable_operation(file_operation_id, "failure")
+                                reserve_state = "released"
                             error_msg = outline_response.error if hasattr(outline_response, 'error') else "Unknown error"
                             return {
                                 "status": "error",
@@ -670,7 +747,13 @@ async def generate_file_outline(
                             "error": "No uploaded file information found in project requirements."
                         }
 
+                except asyncio.CancelledError:
+                    if reserve_state == "created" and file_operation_id:
+                        await release_billable_operation(file_operation_id, "cancelled")
+                    raise
                 except Exception as gen_error:
+                    if reserve_state == "created" and file_operation_id:
+                        await release_billable_operation(file_operation_id, "failure")
                     logger.error(f"Error generating outline from file: {gen_error}")
                     return {
                         "status": "error",

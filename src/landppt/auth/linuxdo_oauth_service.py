@@ -5,7 +5,6 @@ Uses Valkey for state storage with in-memory fallback
 """
 
 import secrets
-import hashlib
 import time
 import httpx
 import logging
@@ -295,9 +294,7 @@ def get_or_create_user_by_linuxdo(
             new_username = f"{username}_{secrets.token_hex(4)}"
         
         # Get default credits for new users
-        default_credits = 0
-        if app_config.enable_credits_system:
-            default_credits = app_config.default_credits_for_new_users
+        default_credits = app_config.default_credits_for_new_users
         
         new_user = User(
             username=new_username,
@@ -312,8 +309,8 @@ def get_or_create_user_by_linuxdo(
             created_at=time.time(),
             last_login=time.time()
         )
-        # Set a random password hash (can't be used for login)
-        new_user.password_hash = hashlib.sha256(secrets.token_bytes(32)).hexdigest()
+        # Set an unknown high-entropy password (OAuth users cannot use it).
+        new_user.set_password(secrets.token_urlsafe(48))
         
         db.add(new_user)
         db.flush()

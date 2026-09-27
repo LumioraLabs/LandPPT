@@ -503,24 +503,6 @@ class UnattendedPipelineRunner:
         if not has_credits:
             raise RuntimeError(f"积分不足，本阶段需要 {required} 积分，当前余额 {balance} 积分")
 
-    async def _charge_credits(
-        self, operation: str, quantity: int, provider: Optional[str], description: str
-    ) -> None:
-        if quantity <= 0:
-            return
-        from ..web.route_modules.support import consume_credits_for_operation
-
-        billed, message = await consume_credits_for_operation(
-            self.user_id,
-            operation,
-            quantity,
-            description=description,
-            reference_id=self.project_id,
-            provider_name=provider,
-        )
-        if not billed:
-            logger.error("Unattended billing failed for %s on %s: %s", operation, self.project_id, message)
-
     async def _load_project(self):
         service = self._service()
         project = await service.project_manager.get_project(self.project_id, user_id=self.user_id)
@@ -549,6 +531,38 @@ class UnattendedPipelineRunner:
 
         outline_provider = await self._resolve_provider("outline")
         await self._require_credits("outline_generation", 1, outline_provider)
+        from ..web.route_modules.outline_support import _outline_reservation_quantity
+        from ..web.route_modules.support import (
+            acquire_billable_hold,
+            billable_operation_id,
+            commit_billable_operation,
+            release_billable_operation,
+        )
+
+        outline_hold = _outline_reservation_quantity(confirmed_requirements)
+        outline_operation_id = billable_operation_id(
+            "unattended-outline",
+            self.project_id,
+            str(bool(force_file_regeneration)),
+        )
+        proceed, reserve_message, _reserve_state, outline_owned = await acquire_billable_hold(
+            self.user_id,
+            outline_operation_id,
+            "outline_generation",
+            outline_hold,
+            reference_id=self.project_id,
+            provider_name=outline_provider,
+        )
+        if not proceed:
+            if _reserve_state == "committed":
+                await self._set_stage(
+                    "outline",
+                    status="completed",
+                    message="大纲已完成",
+                    detail={"reused": True, "already_completed": True},
+                )
+                return
+            raise RuntimeError(reserve_message or "大纲生成正在进行")
 
         content_source = confirmed_requirements.get("content_source")
         if content_source in ("file", "url"):
@@ -572,48 +586,63 @@ class UnattendedPipelineRunner:
         llm_call_count = 0
         # Own the stream: an abandoned generator would unwind the conversation
         # scope in a copied Context when the loop's finalizer gets to it.
-        async with aclosing(chunk_source):
-            async for chunk in chunk_source:
-                for line in str(chunk).splitlines():
-                    if not line.startswith("data: "):
-                        continue
-                    try:
-                        payload = json.loads(line[6:])
-                    except Exception:  # noqa: BLE001
-                        continue
-                    if payload.get("error"):
-                        stream_error = str(payload["error"])
-                    elif payload.get("done") is True:
-                        done = True
+        try:
+            async with aclosing(chunk_source):
+                async for chunk in chunk_source:
+                    for line in str(chunk).splitlines():
+                        if not line.startswith("data: "):
+                            continue
                         try:
-                            llm_call_count = max(0, int(payload.get("llm_call_count", 1)))
-                        except (TypeError, ValueError):
-                            llm_call_count = 1
-                    elif isinstance(payload.get("status"), dict):
-                        status_payload = payload["status"]
-                        raw_progress = status_payload.get("progress")
-                        try:
-                            # The outline stream reports 0..1, not 0..100.
-                            progress = float(raw_progress) * 100.0 if raw_progress is not None else None
-                        except (TypeError, ValueError):
-                            progress = None
-                        await self._set_stage(
-                            "outline",
-                            progress=progress,
-                            message=str(status_payload.get("message") or "生成大纲中…"),
-                        )
+                            payload = json.loads(line[6:])
+                        except Exception:  # noqa: BLE001
+                            continue
+                        if payload.get("error"):
+                            stream_error = str(payload["error"])
+                        elif payload.get("done") is True:
+                            done = True
+                            try:
+                                llm_call_count = max(0, int(payload.get("llm_call_count", 1)))
+                            except (TypeError, ValueError):
+                                llm_call_count = 1
+                        elif isinstance(payload.get("status"), dict):
+                            status_payload = payload["status"]
+                            raw_progress = status_payload.get("progress")
+                            try:
+                                # The outline stream reports 0..1, not 0..100.
+                                progress = float(raw_progress) * 100.0 if raw_progress is not None else None
+                            except (TypeError, ValueError):
+                                progress = None
+                            await self._set_stage(
+                                "outline",
+                                progress=progress,
+                                message=str(status_payload.get("message") or "生成大纲中…"),
+                            )
+        except asyncio.CancelledError:
+            if outline_owned:
+                await release_billable_operation(outline_owned, "cancelled")
+            raise
+        except Exception:
+            if outline_owned:
+                await release_billable_operation(outline_owned, "failure")
+            raise
 
         if stream_error:
+            if outline_owned:
+                await release_billable_operation(outline_owned, "failure")
             raise RuntimeError(f"大纲生成失败：{stream_error}")
 
         refreshed = await self._load_project()
         slides = (refreshed.outline or {}).get("slides") if isinstance(refreshed.outline, dict) else None
         if not slides:
+            if outline_owned:
+                await release_billable_operation(outline_owned, "failure")
             raise RuntimeError("大纲生成失败：未产生任何页面")
 
-        await self._charge_credits(
-            "outline_generation", llm_call_count, outline_provider, f"大纲生成(无人值守): {self.topic}"
-        )
+        if outline_owned:
+            await commit_billable_operation(
+                outline_owned, min(outline_hold, max(0, llm_call_count))
+            )
+            outline_owned = None
 
         await self._set_stage(
             "outline",
@@ -821,6 +850,36 @@ class UnattendedPipelineRunner:
 
         speech_provider = (speech_service.provider_settings or {}).get("provider")
         await self._require_credits("ai_other", len(missing), speech_provider)
+        from ..web.route_modules.support import (
+            acquire_billable_hold,
+            billable_operation_id,
+            commit_billable_operation,
+            release_billable_operation,
+        )
+
+        speech_operation_id = billable_operation_id(
+            "unattended-speech",
+            self.project_id,
+            ",".join(str(index) for index in missing),
+        )
+        proceed, reserve_message, _speech_state, speech_owned = await acquire_billable_hold(
+            self.user_id,
+            speech_operation_id,
+            "ai_other",
+            len(missing),
+            reference_id=self.project_id,
+            provider_name=speech_provider,
+        )
+        if not proceed:
+            if _speech_state == "committed":
+                await self._set_stage(
+                    "speech_script",
+                    status="completed",
+                    message="演讲稿已完成",
+                    detail={"reused": True, "already_completed": True},
+                )
+                return
+            raise RuntimeError(reserve_message or "演讲稿生成正在进行")
 
         customization = SpeechScriptCustomization(
             language=self.language,
@@ -850,12 +909,23 @@ class UnattendedPipelineRunner:
                 )
             )
 
-        result = await speech_service.generate_multi_slide_scripts_with_retry(
-            project, missing, customization, progress_callback=_on_progress
-        )
+        try:
+            result = await speech_service.generate_multi_slide_scripts_with_retry(
+                project, missing, customization, progress_callback=_on_progress
+            )
+        except asyncio.CancelledError:
+            if speech_owned:
+                await release_billable_operation(speech_owned, "cancelled")
+            raise
+        except Exception:
+            if speech_owned:
+                await release_billable_operation(speech_owned, "failure")
+            raise
 
         scripts = list(getattr(result, "scripts", None) or [])
         if not scripts:
+            if speech_owned:
+                await release_billable_operation(speech_owned, "failure")
             raise RuntimeError(
                 f"演讲稿生成失败：{getattr(result, 'error_message', None) or '未生成任何内容'}"
             )
@@ -888,9 +958,9 @@ class UnattendedPipelineRunner:
         finally:
             repo.close()
 
-        await self._charge_credits(
-            "ai_other", len(scripts), speech_provider, f"演讲稿生成(无人值守): {len(scripts)}页"
-        )
+        if speech_owned:
+            await commit_billable_operation(speech_owned, len(scripts))
+            speech_owned = None
 
         saved_indices = covered | {script.slide_index for script in scripts}
         still_missing = [index for index in range(len(slides)) if index not in saved_indices]

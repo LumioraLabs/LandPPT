@@ -2,9 +2,9 @@
 Database configuration and session management
 """
 
+import logging
 import os
 import re
-import logging
 from urllib.parse import urlparse
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
@@ -439,8 +439,62 @@ async def init_db(*, bootstrap_admin: bool = True):
             db.close()
 
 
+def _install_daemon_sqlite_workers() -> None:
+    """aiosqlite workers are non-daemon and block interpreter shutdown.
+
+    Pooled connections stay open for the life of the process. Mark their
+    worker threads daemon so exit does not wait on an idle pool.
+    """
+    try:
+        import aiosqlite.core as core
+    except Exception:
+        return
+    if getattr(core.Connection.__await__, "_landppt_daemon_workers", False):
+        return
+    original = core.Connection.__await__
+
+    def _await_with_daemon_worker(self):
+        self._thread.daemon = True
+        return original(self)
+
+    _await_with_daemon_worker._landppt_daemon_workers = True
+    core.Connection.__await__ = _await_with_daemon_worker
+
+
+def _stop_sqlite_worker_threads() -> None:
+    """Stop pooled aiosqlite workers so process exit does not wait on them."""
+    try:
+        import threading
+
+        from aiosqlite.core import _STOP_RUNNING_SENTINEL
+    except Exception:
+        return
+
+    def _stop():
+        return _STOP_RUNNING_SENTINEL
+
+    for thread in threading.enumerate():
+        if not thread.is_alive() or thread.daemon:
+            continue
+        target = getattr(thread, "_target", None)
+        if getattr(target, "__name__", "") != "_connection_worker_thread":
+            continue
+        args = getattr(thread, "_args", None) or ()
+        if not args:
+            continue
+        try:
+            args[0].put_nowait((None, _stop))
+        except Exception:
+            continue
+        thread.join(timeout=2)
+
+
+_install_daemon_sqlite_workers()
+
+
 async def close_db():
     """Close database connections"""
     if async_engine is not None:
         await async_engine.dispose()
+    _stop_sqlite_worker_threads()
 

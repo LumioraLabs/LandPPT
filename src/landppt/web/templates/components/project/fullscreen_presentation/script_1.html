@@ -699,7 +699,8 @@
                 thumbnailDiv.setAttribute('data-slide-index', index);
 
                 thumbnailDiv.innerHTML = `
-                    <iframe srcdoc="${slide.html_content.replace(/"/g, '&quot;')}" title="Slide ${index + 1}"></iframe>
+                    <iframe sandbox="allow-same-origin" referrerpolicy="no-referrer"
+                        srcdoc="${slide.html_content.replace(/"/g, '&quot;')}" title="Slide ${index + 1}"></iframe>
                     <div class="thumbnail-number">${index + 1}</div>
                 `;
 
@@ -764,6 +765,8 @@
 
             const frameId = `slideFrame_${frameIdCounter++}`;
             const iframe = document.createElement('iframe');
+            iframe.setAttribute('sandbox', 'allow-same-origin');
+            iframe.setAttribute('referrerpolicy', 'no-referrer');
             iframe.id = frameId;
             iframe.className = 'slide-frame hidden not-loaded';
             iframe.title = `PPT Slide ${index + 1}`;
@@ -867,6 +870,8 @@
 
             const frameId = `slideFrame_${frameIdCounter++}`;
             const iframe = document.createElement('iframe');
+            iframe.setAttribute('sandbox', 'allow-same-origin');
+            iframe.setAttribute('referrerpolicy', 'no-referrer');
             iframe.id = frameId;
             iframe.className = 'slide-frame hidden not-loaded';
             iframe.title = `PPT Slide ${index + 1}`;

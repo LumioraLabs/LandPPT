@@ -126,6 +126,8 @@
         }
 
         async function loadSlideIntoTempIframe(tempIframe, slideHtml) {
+            tempIframe.setAttribute('sandbox', 'allow-same-origin');
+            tempIframe.setAttribute('referrerpolicy', 'no-referrer');
             const preparedHtml = prepareSlideHtmlForExport(slideHtml);
             tempIframe.srcdoc = preparedHtml;
             await waitForIframeLoad(tempIframe, 6500);

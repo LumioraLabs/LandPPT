@@ -7,11 +7,14 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 import logging
+import hashlib
 import time
 from typing import Optional
 from pydantic import BaseModel, Field, ValidationError
 
 from .auth_service import get_auth_service, AuthService
+from .cookies import clear_session_cookie, set_session_cookie
+from .security import get_client_ip
 from .middleware import get_current_user_optional, get_current_user_required, get_current_user
 from ..database.database import get_db
 from ..database.models import User
@@ -90,17 +93,40 @@ async def _load_system_oauth_flags() -> dict:
 
 
 def _get_client_ip(request: Request) -> Optional[str]:
-    """
-    Best-effort client IP extraction (supports reverse proxies / Cloudflare).
-    """
-    headers = request.headers
-    ip = headers.get("cf-connecting-ip") or headers.get("x-real-ip")
-    if ip:
-        return ip.strip()
-    xff = headers.get("x-forwarded-for")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.client.host if request.client else None
+    """Backward-compatible wrapper around trusted-proxy-aware IP parsing."""
+    return get_client_ip(request)
+
+
+async def _record_failed_login(request: Request, username: str) -> tuple[bool, Optional[int]]:
+    """Apply both account and source-IP failed-login limits."""
+    from ..utils.rate_limiter import hit as rate_limit_hit
+
+    identity = hashlib.sha256(str(username or "").strip().lower().encode("utf-8")).hexdigest()
+    buckets = [
+        (
+            f"rl:login:account:{identity}",
+            app_config.login_account_rate_limit_per_15_minutes,
+        )
+    ]
+    client_ip = _get_client_ip(request)
+    if client_ip:
+        buckets.append(
+            (
+                f"rl:login:ip:{client_ip}",
+                app_config.login_ip_rate_limit_per_15_minutes,
+            )
+        )
+
+    retry_after: Optional[int] = None
+    for key, limit in buckets:
+        allowed, _, reset_in = await rate_limit_hit(
+            key=key,
+            limit=max(1, int(limit)),
+            window_seconds=15 * 60,
+        )
+        if not allowed:
+            retry_after = max(retry_after or 0, reset_in or 15 * 60)
+    return retry_after is None, retry_after
 
 
 def _turnstile_template_ctx() -> dict:
@@ -204,15 +230,22 @@ async def login(
         user = auth_service.authenticate_user(db, username, password)
         
         if not user:
-            return templates.TemplateResponse("pages/auth/login.html", {
+            allowed, retry_after = await _record_failed_login(request, username)
+            error_message = "用户名或密码错误"
+            if not allowed:
+                error_message = "登录尝试次数过多，请稍后再试"
+            response = templates.TemplateResponse("pages/auth/login.html", {
                 "request": request,
-                "error": "用户名或密码错误",
+                "error": error_message,
                 "username": username,
                 "active_tab": "login",
                 **_turnstile_template_ctx(),
                 **(await _oauth_template_ctx()),
                 **registration_ctx,
-            })
+            }, status_code=401 if allowed else 429)
+            if retry_after is not None:
+                response.headers["Retry-After"] = str(retry_after)
+            return response
         
         # Create session
         session_id = auth_service.create_session(db, user)
@@ -234,14 +267,7 @@ async def login(
         current_expire_minutes = auth_service._get_current_expire_minutes()
         cookie_max_age = None if current_expire_minutes == 0 else current_expire_minutes * 60
 
-        response.set_cookie(
-            key="session_id",
-            value=session_id,
-            max_age=cookie_max_age,
-            httponly=True,
-            secure=False,  # Set to True in production with HTTPS
-            samesite="lax"
-        )
+        set_session_cookie(response, session_id, max_age=cookie_max_age)
         
         logger.info(f"User {username} logged in successfully")
         return response
@@ -272,7 +298,7 @@ async def logout(
         auth_service.logout_user(db, session_id)
     
     response = RedirectResponse(url="/auth/login?success=已成功退出登录", status_code=302)
-    response.delete_cookie("session_id")
+    clear_session_cookie(response)
     
     return response
 
@@ -303,7 +329,8 @@ async def change_password(
     """Change user password"""
     try:
         # Validate current password
-        if not user.check_password(current_password):
+        credential_user = db.query(User).filter(User.id == user.id).first()
+        if not credential_user or not credential_user.check_password(current_password):
             return templates.TemplateResponse("pages/account/profile.html", {
                 "request": request,
                 "user": user.to_dict(),
@@ -320,22 +347,23 @@ async def change_password(
                 "error": "新密码和确认密码不匹配"
             })
         
-        if len(new_password) < 6:
+        if len(new_password) < app_config.password_min_length:
             return templates.TemplateResponse("pages/account/profile.html", {
                 "request": request,
                 "user": user.to_dict(),
                 "credits_enabled": app_config.enable_credits_system,
-                "error": "密码长度至少6位"
+                "error": f"密码长度至少{app_config.password_min_length}位"
             })
         
         # Update password
         if auth_service.update_user_password(db, user, new_password):
-            return templates.TemplateResponse("pages/account/profile.html", {
-                "request": request,
-                "user": user.to_dict(),
-                "credits_enabled": app_config.enable_credits_system,
-                "success": "密码修改成功"
-            })
+            await auth_service.invalidate_user_sessions_cache(user.id)
+            response = RedirectResponse(
+                url="/auth/login?success=密码修改成功，请重新登录",
+                status_code=302,
+            )
+            clear_session_cookie(response)
+            return response
         else:
             return templates.TemplateResponse("pages/account/profile.html", {
                 "request": request,
@@ -367,6 +395,13 @@ async def api_login(
     user = auth_service.authenticate_user(db, username, password)
     
     if not user:
+        allowed, retry_after = await _record_failed_login(request, username)
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail="登录尝试次数过多，请稍后再试",
+                headers={"Retry-After": str(retry_after or 900)},
+            )
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     
     session_id = auth_service.create_session(db, user)
@@ -634,8 +669,8 @@ async def register(
     if password != confirm_password:
         return await render_register_error("两次密码输入不一致")
     
-    if len(password) < 6:
-        return await render_register_error("密码长度至少6位")
+    if len(password) < app_config.password_min_length:
+        return await render_register_error(f"密码长度至少{app_config.password_min_length}位")
     
     if len(username) < 3:
         return await render_register_error("用户名至少3个字符")
@@ -717,11 +752,11 @@ async def reset_password(
             error="两次密码输入不一致",
         )
 
-    if len(new_password) < 6:
+    if len(new_password) < app_config.password_min_length:
         return _forgot_password_template_response(
             request,
             email=email,
-            error="密码长度至少6位",
+            error=f"密码长度至少{app_config.password_min_length}位",
         )
 
     # Verify email code
@@ -744,9 +779,10 @@ async def reset_password(
 
     try:
         # Update password
-        user.set_password(new_password)
-        db.commit()
-        await get_auth_service().invalidate_user_sessions_cache(user.id)
+        auth_service = get_auth_service()
+        if not auth_service.update_user_password(db, user, new_password):
+            raise RuntimeError("Password update failed")
+        await auth_service.invalidate_user_sessions_cache(user.id)
         logger.info(f"Password reset for user: {user.username}")
         return RedirectResponse(
             url="/auth/login?success=密码重置成功，请登录",

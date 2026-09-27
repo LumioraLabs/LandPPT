@@ -4,6 +4,7 @@ Template-selection routes extracted from the legacy web router.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime
 import json
@@ -15,11 +16,14 @@ from fastapi.responses import StreamingResponse
 from ...auth.middleware import get_current_user_required
 from ...database.models import User
 from .support import (
+    acquire_billable_hold,
+    billable_operation_id,
     check_credits_for_operation,
-    consume_credits_for_operation,
+    commit_billable_operation,
     get_ppt_service_for_user,
     logger,
     ppt_service,
+    release_billable_operation,
 )
 
 router = APIRouter()
@@ -114,6 +118,7 @@ async def generate_project_free_template(
     user: User = Depends(get_current_user_required),
 ):
     """Generate or regenerate a project's free template."""
+    free_owned = None
     try:
         try:
             payload = await request.json()
@@ -162,34 +167,75 @@ async def generate_project_free_template(
                     )
                 return {"success": False, "error": message}
 
+        if will_generate:
+            free_operation_id = billable_operation_id(
+                "free-template", project_id, str(bool(force))
+            )
+            proceed, reserve_message, reserve_state, free_owned = await acquire_billable_hold(
+                user.id,
+                free_operation_id,
+                "template_generation",
+                1,
+                reference_id=project_id,
+                provider_name=template_provider_name,
+            )
+            if not proceed:
+                if want_stream:
+                    async def blocked_free_template():
+                        yield (
+                            "data: "
+                            + json.dumps(
+                                {
+                                    "type": "error",
+                                    "message": reserve_message,
+                                    "in_progress": reserve_state == "reserved",
+                                    "already_completed": reserve_state == "committed",
+                                },
+                                ensure_ascii=False,
+                            )
+                            + "\n\n"
+                        )
+
+                    return StreamingResponse(
+                        blocked_free_template(),
+                        media_type="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+                    )
+                return {
+                    "success": reserve_state == "committed",
+                    "already_completed": reserve_state == "committed",
+                    "in_progress": reserve_state == "reserved",
+                    "error": reserve_message,
+                }
+
+        free_owned_box = [free_owned]
         if want_stream:
             async def event_stream():
-                credits_consumed = False
                 try:
                     async for event in user_ppt_service.stream_free_template_generation(
                         project_id,
                         user_id=user.id,
                         force=force,
                     ):
-                        if (
-                            will_generate
-                            and not credits_consumed
-                            and (event or {}).get("type") == "complete"
-                        ):
-                            await consume_credits_for_operation(
-                                user.id,
-                                "template_generation",
-                                1,
-                                description="Free template generation",
-                                reference_id=project_id,
-                                provider_name=template_provider_name,
-                            )
-                            credits_consumed = True
+                        if free_owned_box[0] and (event or {}).get("type") == "complete":
+                            await commit_billable_operation(free_owned_box[0], 1)
+                            free_owned_box[0] = None
 
                         yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                except asyncio.CancelledError:
+                    if free_owned_box[0]:
+                        await release_billable_operation(free_owned_box[0], "cancelled")
+                        free_owned_box[0] = None
+                    raise
                 except HTTPException as exc:
+                    if free_owned_box[0]:
+                        await release_billable_operation(free_owned_box[0], "failure")
+                        free_owned_box[0] = None
                     yield f"data: {json.dumps({'type': 'error', 'message': exc.detail}, ensure_ascii=False)}\n\n"
                 except Exception as exc:  # noqa: BLE001
+                    if free_owned_box[0]:
+                        await release_billable_operation(free_owned_box[0], "failure")
+                        free_owned_box[0] = None
                     logger.error("Error generating free template for project %s: %s", project_id, exc)
                     yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
 
@@ -200,34 +246,43 @@ async def generate_project_free_template(
             )
 
         template = None
-        async for event in user_ppt_service.stream_free_template_generation(
-            project_id,
-            user_id=user.id,
-            force=force,
-        ):
-            if (event or {}).get("type") == "complete":
-                template = (event or {}).get("template")
-                break
-            if (event or {}).get("type") == "error":
-                raise HTTPException(status_code=500, detail=(event or {}).get("message") or "Failed to generate free template")
+        try:
+            async for event in user_ppt_service.stream_free_template_generation(
+                project_id,
+                user_id=user.id,
+                force=force,
+            ):
+                if (event or {}).get("type") == "complete":
+                    template = (event or {}).get("template")
+                    break
+                if (event or {}).get("type") == "error":
+                    raise HTTPException(status_code=500, detail=(event or {}).get("message") or "Failed to generate free template")
+        except asyncio.CancelledError:
+            if free_owned:
+                await release_billable_operation(free_owned, "cancelled")
+            raise
 
         if not template:
+            if free_owned:
+                await release_billable_operation(free_owned, "failure")
             raise HTTPException(status_code=500, detail="Failed to generate free template")
 
-        if will_generate:
-            await consume_credits_for_operation(
-                user.id,
-                "template_generation",
-                1,
-                description="Free template generation",
-                reference_id=project_id,
-                provider_name=template_provider_name,
-            )
+        if free_owned:
+            await commit_billable_operation(free_owned, 1)
+            free_owned = None
 
         return {"success": True, "template": template}
     except HTTPException:
+        if free_owned:
+            await release_billable_operation(free_owned, "failure")
+        raise
+    except asyncio.CancelledError:
+        if free_owned:
+            await release_billable_operation(free_owned, "cancelled")
         raise
     except Exception as exc:  # noqa: BLE001
+        if free_owned:
+            await release_billable_operation(free_owned, "failure")
         logger.error("Error generating free template for project %s: %s", project_id, exc)
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -319,6 +374,7 @@ async def adjust_project_free_template(
     user: User = Depends(get_current_user_required),
 ):
     """Adjust the generated free template based on user feedback."""
+    adjust_owned = None
     try:
         data = await request.json()
         adjustment_request = (data.get("adjustment_request") or "").strip()
@@ -350,6 +406,25 @@ async def adjust_project_free_template(
         if not has_credits:
             return {"success": False, "error": f"Insufficient credits, need {required}, current {balance}"}
 
+        adjust_operation_id = billable_operation_id(
+            "free-template-adjust", project_id, adjustment_request
+        )
+        proceed, reserve_message, reserve_state, adjust_owned = await acquire_billable_hold(
+            user.id,
+            adjust_operation_id,
+            "template_generation",
+            1,
+            reference_id=project_id,
+            provider_name=template_provider_name,
+        )
+        if not proceed:
+            return {
+                "success": reserve_state == "committed",
+                "already_completed": reserve_state == "committed",
+                "in_progress": reserve_state == "reserved",
+                "error": reserve_message,
+            }
+
         adjusted_html = None
         async for chunk in user_ppt_service.global_template_service.adjust_template_with_ai_stream(
             current_html=current_html,
@@ -372,14 +447,9 @@ async def adjust_project_free_template(
         await user_ppt_service.project_manager.update_project_metadata(project_id, metadata)
         user_ppt_service.clear_cached_style_genes(project_id)
 
-        await consume_credits_for_operation(
-            user.id,
-            "template_generation",
-            1,
-            description="Free template adjustment",
-            reference_id=project_id,
-            provider_name=template_provider_name,
-        )
+        if adjust_owned:
+            await commit_billable_operation(adjust_owned, 1)
+            adjust_owned = None
 
         return {
             "success": True,
@@ -389,7 +459,15 @@ async def adjust_project_free_template(
             },
         }
     except HTTPException:
+        if adjust_owned:
+            await release_billable_operation(adjust_owned, "failure")
+        raise
+    except asyncio.CancelledError:
+        if adjust_owned:
+            await release_billable_operation(adjust_owned, "cancelled")
         raise
     except Exception as exc:  # noqa: BLE001
+        if adjust_owned:
+            await release_billable_operation(adjust_owned, "failure")
         logger.error("Error adjusting free template for project %s: %s", project_id, exc)
         raise HTTPException(status_code=500, detail=str(exc))

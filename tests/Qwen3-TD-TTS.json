@@ -1,0 +1,25 @@
+{
+  "19": {
+    "inputs": {
+      "audio": "placeholder.wav"
+    },
+    "class_type": "LoadAudio"
+  },
+  "24": {
+    "inputs": {
+      "precision": "fp16",
+      "device": "cuda",
+      "attn_implementation": "sdpa"
+    },
+    "class_type": "TDQwen3TTSModel"
+  },
+  "31": {
+    "inputs": {
+      "text": "",
+      "language": "Chinese",
+      "ref_text": "",
+      "ref_audio": ["19", 0]
+    },
+    "class_type": "TDQwen3TTSVoiceClone"
+  }
+}

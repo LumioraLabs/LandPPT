@@ -1658,7 +1658,8 @@
                     </div>
                 </div>
                 <div class="slide-preview loading">
-                    <iframe title="Slide ${slideData.page_number}"
+                    <iframe title="Slide ${slideData.page_number}" sandbox="allow-same-origin"
+                            referrerpolicy="no-referrer"
                             srcdoc="${slideData.html_content.replace(/"/g, '&quot;')}"
                             onload="adjustIframeHeight(this)"></iframe>
                 </div>

@@ -13,16 +13,19 @@ from ...auth.middleware import get_current_user_required
 from ...database.models import User
 from ...services.slide.svg_page.render_mode import normalize_render_mode
 from .outline_support import (
-    _is_billable_provider,
     _normalize_content_source_urls,
+    _outline_reservation_quantity,
     _process_uploaded_files_for_outline,
     _process_url_sources_for_outline,
     _save_uploaded_files_for_confirmed_requirements,
 )
 from .support import (
+    acquire_billable_hold,
+    billable_operation_id,
     check_credits_for_operation,
-    consume_credits_for_operation,
+    commit_billable_operation,
     get_ppt_service_for_user,
+    release_billable_operation,
     logger,
     ppt_service,
     templates,
@@ -137,9 +140,25 @@ async def confirm_project_requirements(
             if not source_urls:
                 raise Exception("Please provide at least one valid URL (http/https).")
         # Legacy synchronous file/url generation remains disabled below to avoid long-lived confirm requests.
+        requirements_owned = None
+        requirements_hold = 1
         if False and content_source == "file":
             # Process uploaded files (support multiple files) and generate outline
             # 使用项目创建时的 network_mode 和 language 参数
+            _, outline_settings = await user_ppt_service.get_role_provider_async("outline")
+            requirements_hold = _outline_reservation_quantity(
+                {"page_count_settings": {"mode": page_count_mode, "min_pages": min_pages, "max_pages": max_pages, "fixed_pages": fixed_pages}}
+            )
+            proceed, reserve_message, _state, requirements_owned = await acquire_billable_hold(
+                user.id,
+                billable_operation_id("outline-requirements", project_id, "file"),
+                "outline_generation",
+                requirements_hold,
+                reference_id=project_id,
+                provider_name=outline_settings.get("provider"),
+            )
+            if not proceed:
+                raise Exception(reserve_message or "大纲生成正在进行")
             file_outline = await _process_uploaded_files_for_outline(
                 file_upload, topic, target_audience, page_count_mode, min_pages, max_pages,
                 fixed_pages, ppt_style, custom_style_prompt,
@@ -158,6 +177,20 @@ async def confirm_project_requirements(
             if not source_urls:
                 raise Exception("Please provide at least one valid URL (http/https).")
 
+            _, outline_settings = await user_ppt_service.get_role_provider_async("outline")
+            requirements_hold = _outline_reservation_quantity(
+                {"page_count_settings": {"mode": page_count_mode, "min_pages": min_pages, "max_pages": max_pages, "fixed_pages": fixed_pages}}
+            )
+            proceed, reserve_message, _state, requirements_owned = await acquire_billable_hold(
+                user.id,
+                billable_operation_id("outline-requirements", project_id, "url"),
+                "outline_generation",
+                requirements_hold,
+                reference_id=project_id,
+                provider_name=outline_settings.get("provider"),
+            )
+            if not proceed:
+                raise Exception(reserve_message or "大纲生成正在进行")
             file_outline = await _process_url_sources_for_outline(
                 source_urls=source_urls,
                 topic=topic,
@@ -183,8 +216,6 @@ async def confirm_project_requirements(
 
         # Bill file/url outline generation by actual LLM call count.
         if content_source in ("file", "url") and file_outline:
-            _, outline_settings = await user_ppt_service.get_role_provider_async("outline")
-            outline_provider_name = outline_settings.get("provider")
             llm_call_count = 0
             try:
                 metadata = file_outline.get("metadata", {}) if isinstance(file_outline, dict) else {}
@@ -194,26 +225,12 @@ async def confirm_project_requirements(
             except Exception:
                 llm_call_count = 0
 
-            if llm_call_count > 0 and _is_billable_provider(outline_provider_name):
-                has_credits, required, balance = await check_credits_for_operation(
-                    user.id,
-                    "outline_generation",
-                    llm_call_count,
-                    provider_name=outline_provider_name,
+            if requirements_owned:
+                await commit_billable_operation(
+                    requirements_owned,
+                    min(requirements_hold, max(0, llm_call_count)),
                 )
-                if not has_credits:
-                    raise Exception(f"积分不足，大纲生成需要 {required} 积分，当前余额 {balance} 积分")
-
-                billed, bill_message = await consume_credits_for_operation(
-                    user.id,
-                    "outline_generation",
-                    llm_call_count,
-                    description=f"文件大纲生成(需求确认): {topic or project.topic}",
-                    reference_id=project_id,
-                    provider_name=outline_provider_name,
-                )
-                if not billed:
-                    raise Exception(bill_message or "积分扣费失败")
+                requirements_owned = None
 
         # Process page count settings
         page_count_settings = {
