@@ -10,6 +10,8 @@ from urllib.parse import quote
 import logging
 
 from .auth_service import get_auth_service, AuthService
+from .cookies import set_session_cookie
+from .security import safe_local_redirect
 from .middleware import get_current_user
 from ..database.database import get_db
 
@@ -54,7 +56,7 @@ async def linuxdo_login(
     state = generate_state()
     
     # Store state
-    await store_oauth_state(state, redirect_url, invite_code=invite_code)
+    await store_oauth_state(state, safe_local_redirect(redirect_url), invite_code=invite_code)
     
     # Build authorization URL and redirect
     auth_url = build_authorization_url(state)
@@ -114,7 +116,7 @@ async def linuxdo_callback(
             status_code=302
         )
     
-    redirect_url = state_data.get("redirect_url", "/dashboard")
+    redirect_url = safe_local_redirect(state_data.get("redirect_url"))
     invite_code = state_data.get("invite_code")
     
     # Exchange code for access token
@@ -162,14 +164,7 @@ async def linuxdo_callback(
     current_expire_minutes = auth_service._get_current_expire_minutes()
     cookie_max_age = None if current_expire_minutes == 0 else current_expire_minutes * 60
     
-    response.set_cookie(
-        key="session_id",
-        value=session_id,
-        max_age=cookie_max_age,
-        httponly=True,
-        secure=False,
-        samesite="lax"
-    )
+    set_session_cookie(response, session_id, max_age=cookie_max_age)
     
     logger.info(f"User {user.username} logged in via Linux Do OAuth (linuxdo_id={linuxdo_user['id']})")
     return response

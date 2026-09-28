@@ -367,6 +367,9 @@ function setSafeIframeContentNoFlash(iframe, html, callback) {
         return;
     }
 
+    iframe.setAttribute('sandbox', 'allow-same-origin');
+    iframe.setAttribute('referrerpolicy', 'no-referrer');
+
     // 检查内容是否相同，避免不必要的更新
     if (iframe.getAttribute('data-current-content') === html) {
         installSlideshowFrameWheelBridge(iframe);

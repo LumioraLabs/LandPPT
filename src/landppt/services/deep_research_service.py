@@ -3,7 +3,6 @@ DEEP Research Service - Advanced research functionality using Tavily API
 """
 
 import asyncio
-import ipaddress
 import inspect
 import json
 import logging
@@ -21,6 +20,12 @@ from ..core.config import ai_config
 from ..ai import get_ai_provider
 from .prompts.system_prompts import SystemPrompts
 from .runtime.ai_execution import scoped_ai_conversation
+from ..utils.safe_fetch import (
+    read_response_limited,
+    safe_client_session,
+    safe_request,
+    validate_public_http_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1318,14 +1323,17 @@ class DEEPResearchService:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5",
         }
         try:
-            async with aiohttp.ClientSession(
+            async with safe_client_session(
                 timeout=aiohttp.ClientTimeout(total=timeout_seconds),
                 headers=headers,
             ) as session:
-                async with session.get(url, allow_redirects=True) as response:
-                    raw_text = await response.text(errors="replace")
+                response = await safe_request(session, "GET", url)
+                async with response:
+                    raw_bytes = await read_response_limited(response, 5 * 1024 * 1024)
+                    raw_text = raw_bytes.decode(response.charset or "utf-8", errors="replace")
                     content_type = response.headers.get("content-type", "")
                     final_url = str(response.url)
+                    status = response.status
 
             title = ""
             content = raw_text
@@ -1338,10 +1346,10 @@ class DEEPResearchService:
                 content = re.sub(r"\s+", " ", soup.get_text(" ", strip=True)).strip()
 
             return {
-                "success": 200 <= response.status < 400,
+                "success": 200 <= status < 400,
                 "tool": "fetch",
                 "url": final_url,
-                "status": response.status,
+                "status": status,
                 "content_type": content_type,
                 "title": title,
                 "content": self._truncate_text(content, 12000),
@@ -1362,75 +1370,16 @@ class DEEPResearchService:
                 "error": validation_error,
             }
 
-        timeout_seconds = self._coerce_int(tool_input.get("timeout"), 30, 3, 90)
-        args = [
-            "curl",
-            "--location",
-            "--silent",
-            "--show-error",
-            "--compressed",
-            "--max-time",
-            str(timeout_seconds),
-            "--connect-timeout",
-            str(min(timeout_seconds, 10)),
-            url,
-        ]
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_seconds + 5
-            )
-            content = stdout.decode("utf-8", errors="replace")
-            error_text = stderr.decode("utf-8", errors="replace")
-            return {
-                "success": proc.returncode == 0,
-                "tool": "curl",
-                "url": url,
-                "returncode": proc.returncode,
-                "content": self._truncate_text(content, 12000),
-                "stderr": self._truncate_text(error_text, 2000),
-            }
-        except FileNotFoundError:
-            fallback = await self._tool_fetch(tool_input)
-            fallback["tool"] = "curl"
-            fallback["fallback"] = "fetch"
-            return fallback
-        except asyncio.TimeoutError:
-            return {
-                "success": False,
-                "tool": "curl",
-                "url": url,
-                "error": "curl timed out",
-            }
-        except Exception as exc:  # noqa: BLE001
-            return {"success": False, "tool": "curl", "url": url, "error": str(exc)}
+        result = await self._tool_fetch(tool_input)
+        result["tool"] = "curl"
+        result["implementation"] = "safe_fetch"
+        return result
 
     def _validate_public_http_url(self, url: str) -> Optional[str]:
-        parsed = urlparse(url)
-        if parsed.scheme not in {"http", "https"}:
-            return "Only http and https URLs are supported"
-        if not parsed.hostname:
-            return "URL hostname is required"
-        hostname = parsed.hostname.lower()
-        if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith(
-            ".local"
-        ):
-            return "Localhost and .local URLs are not allowed"
         try:
-            ip_address = ipaddress.ip_address(hostname)
-            if (
-                ip_address.is_private
-                or ip_address.is_loopback
-                or ip_address.is_link_local
-                or ip_address.is_reserved
-            ):
-                return "Private, loopback, link-local, and reserved IP URLs are not allowed"
-        except ValueError:
-            pass
+            validate_public_http_url(url)
+        except ValueError as exc:
+            return str(exc)
         return None
 
     def _normalize_tavily_results(self, raw_results: Any) -> List[Dict[str, Any]]:

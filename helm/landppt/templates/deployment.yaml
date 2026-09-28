@@ -40,7 +40,7 @@ spec:
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if or (and .Values.persistence.enabled .Values.volumePermissions.enabled) .Values.postgresql.enabled .Values.minio.enabled }}
+      {{- if or (and .Values.persistence.enabled .Values.volumePermissions.enabled) .Values.postgresql.enabled .Values.minio.enabled .Values.migration.enabled }}
       initContainers:
         {{- if and .Values.persistence.enabled .Values.volumePermissions.enabled }}
         # Some local/hostPath provisioners do not apply fsGroup to newly-created
@@ -129,6 +129,9 @@ spec:
                 echo "waiting for postgresql..."; sleep 2;
               done
         {{- end }}
+        {{- if .Values.migration.enabled }}
+        {{- include "landppt.migrateInitContainer" . | nindent 8 }}
+        {{- end }}
       {{- end }}
       containers:
         - name: landppt
@@ -159,11 +162,11 @@ spec:
             {{- include "landppt.databaseEnv" . | nindent 12 }}
           {{- with .Values.livenessProbe }}
           livenessProbe:
-            {{- toYaml . | nindent 12 }}
+            {{- include "landppt.renderHttpProbe" (dict "probe" . "root" $) | nindent 12 }}
           {{- end }}
           {{- with .Values.readinessProbe }}
           readinessProbe:
-            {{- toYaml . | nindent 12 }}
+            {{- include "landppt.renderHttpProbe" (dict "probe" . "root" $) | nindent 12 }}
           {{- end }}
           {{- with .Values.resources }}
           resources:

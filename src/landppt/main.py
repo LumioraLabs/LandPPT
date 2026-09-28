@@ -2,16 +2,25 @@
 Main FastAPI application entry point
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, FileResponse, PlainTextResponse
+from fastapi.responses import (
+    HTMLResponse,
+    FileResponse,
+    JSONResponse,
+    PlainTextResponse,
+)
+from importlib.metadata import PackageNotFoundError, version as package_version
 import uvicorn
 import asyncio
+import hmac
 import logging
 import os
 import sys
 import time
+from contextlib import asynccontextmanager
 from .api.openai_compat import router as openai_router
 from .api.landppt_api import router as landppt_router
 from .api.database_api import router as database_router
@@ -23,52 +32,51 @@ from .web import router as web_router
 from .web.admin_routes import router as admin_router
 from .web.community_routes import router as community_router
 from .web.credits_routes import router as credits_router
+from .web.account_routes import router as account_router
+from .web.billing_routes import router as billing_router
 from .auth import auth_router, create_auth_middleware
 from .database.startup_initialization import run_startup_initialization
 from .core.config import app_config
 from .services.metrics import metrics_collector
+from .auth.request_context import resolve_request_base_url
+from .auth.security import normalized_origin
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Disable SQLAlchemy verbose logging completely
-logging.getLogger('sqlalchemy').setLevel(logging.WARNING)
-logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)
-logging.getLogger('sqlalchemy.engine.Engine').setLevel(logging.WARNING)
-logging.getLogger('sqlalchemy.pool').setLevel(logging.WARNING)
-logging.getLogger('sqlalchemy.dialects').setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy").setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy.engine.Engine").setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy.dialects").setLevel(logging.WARNING)
 
-# Create FastAPI app
-app = FastAPI(
-    title="LandPPT API",
-    description="AI-powered PPT generation platform with OpenAI-compatible API",
-    version="0.1.0",
-    docs_url="/docs" if app_config.enable_api_docs else None,
-    redoc_url="/redoc" if app_config.enable_api_docs else None,
-    openapi_url="/openapi.json" if app_config.enable_api_docs else None,
-)
+try:
+    application_version = package_version("landppt")
+except PackageNotFoundError:  # pragma: no cover - source checkout without install
+    application_version = "0.0.0"
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize database on startup"""
+async def startup_application():
+    """Initialize database and required services before serving."""
+    from .core.production_config import validate_production_config
+
+    validate_production_config(app_config)
     try:
-        await run_startup_initialization()
-
+        return await run_startup_initialization()
     except Exception as e:
         logger.error(f"Failed to initialize application: {e}")
         raise
 
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Clean up database connections on shutdown"""
+async def shutdown_application():
+    """Clean up database connections and cache clients on shutdown."""
     try:
         logger.info("Shutting down application...")
-        # Close cache service if enabled
         try:
             from .services.cache_service import close_cache_service
+
             await close_cache_service()
         except Exception:
             pass
@@ -76,14 +84,68 @@ async def shutdown_event():
     except Exception as e:
         logger.error(f"Error during shutdown: {e}")
 
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # In production, specify actual origins
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+
+async def startup_event():
+    """Backward-compatible startup hook used by initialization tests."""
+    await startup_application()
+
+
+async def shutdown_event():
+    """Backward-compatible shutdown hook."""
+    await shutdown_application()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Run startup, then shutdown even when the server task is cancelled."""
+    from .services.credits_service import sweep_expired_credit_reservations
+
+    sweep_task = asyncio.create_task(sweep_expired_credit_reservations())
+    try:
+        await startup_application()
+        try:
+            yield
+        except asyncio.CancelledError:
+            await shutdown_application()
+            return
+        except BaseException:
+            await shutdown_application()
+            raise
+        await shutdown_application()
+    finally:
+        sweep_task.cancel()
+        try:
+            await sweep_task
+        except asyncio.CancelledError:
+            pass
+
+
+# Create FastAPI app
+app = FastAPI(
+    title="LandPPT API",
+    description="AI-powered PPT generation platform with OpenAI-compatible API",
+    version=application_version,
+    docs_url="/docs" if app_config.enable_api_docs else None,
+    redoc_url="/redoc" if app_config.enable_api_docs else None,
+    openapi_url="/openapi.json" if app_config.enable_api_docs else None,
+    lifespan=lifespan,
 )
+
+
+# Cross-origin browser access is disabled unless explicitly allowlisted.
+cors_origins = app_config.get_cors_allowed_origins()
+if cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_credentials="*" not in cors_origins,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-API-Key", "X-CSRF-Token"],
+    )
+
+allowed_hosts = app_config.get_allowed_hosts()
+if allowed_hosts != ["*"]:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
 # Add authentication middleware
 auth_middleware = create_auth_middleware()
@@ -109,6 +171,45 @@ async def metrics_middleware(request, call_next):
             time.perf_counter() - started_at,
         )
 
+
+@app.middleware("http")
+async def browser_security_middleware(request: Request, call_next):
+    """Enforce same-origin cookie mutations and baseline browser headers."""
+    if (
+        app_config.csrf_origin_check_enabled
+        and request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}
+        and request.cookies.get("session_id")
+    ):
+        fetch_site = (request.headers.get("sec-fetch-site") or "").strip().lower()
+        supplied_origin = normalized_origin(request.headers.get("origin"))
+        if supplied_origin is None:
+            supplied_origin = normalized_origin(request.headers.get("referer"))
+        expected_origin = normalized_origin(resolve_request_base_url(request))
+
+        if (
+            fetch_site == "cross-site"
+            or not supplied_origin
+            or supplied_origin != expected_origin
+        ):
+            if request.url.path.startswith(("/api/", "/v1/")):
+                return JSONResponse(
+                    {"detail": "Cross-site request rejected"}, status_code=403
+                )
+            return PlainTextResponse("Cross-site request rejected", status_code=403)
+
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=(), payment=()",
+    )
+    if app_config.session_cookie_secure:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+    return response
+
+
 # Include routers
 app.include_router(auth_router, prefix="", tags=["Authentication"])
 app.include_router(config_router, prefix="", tags=["Configuration Management"])
@@ -119,6 +220,8 @@ app.include_router(web_router, prefix="", tags=["Web Interface"])
 app.include_router(admin_router, tags=["Admin Management"])
 app.include_router(community_router, tags=["Community Pages"])
 app.include_router(credits_router, tags=["Credits System"])
+app.include_router(billing_router, tags=["Billing"])
+app.include_router(account_router, tags=["Account"])
 app.include_router(openai_router, prefix="/v1", tags=["OpenAI Compatible"])
 app.include_router(landppt_router, prefix="/api", tags=["LandPPT API"])
 app.include_router(template_api_router, tags=["Global Master Templates"])
@@ -133,23 +236,27 @@ app.mount("/static", StaticFiles(directory=static_dir), name="static")
 # AI-generated slide HTML may reference fonts like /assets/inter-latin-400-normal-C38fXH4l.woff2
 # (Vite/@fontsource bundled paths). This route parses the naming pattern and redirects to CDN.
 import re
+
 _FONTSOURCE_RE = re.compile(
-    r'^(?P<family>[a-z0-9-]+?)-(?P<subset>[a-z]+)-(?P<weight>\d+)-(?P<style>[a-z]+)-[A-Za-z0-9_-]+\.woff2$'
+    r"^(?P<family>[a-z0-9-]+?)-(?P<subset>[a-z]+)-(?P<weight>\d+)-(?P<style>[a-z]+)-[A-Za-z0-9_-]+\.woff2$"
 )
+
 
 @app.get("/assets/{filename:path}")
 async def serve_font_asset(filename: str):
     """Redirect fontsource-style font requests to jsDelivr CDN"""
     from fastapi.responses import RedirectResponse
+
     m = _FONTSOURCE_RE.match(filename)
     if m:
-        family = m.group('family')
-        subset = m.group('subset')
-        weight = m.group('weight')
-        style = m.group('style')
+        family = m.group("family")
+        subset = m.group("subset")
+        weight = m.group("weight")
+        style = m.group("style")
         cdn_url = f"https://cdn.jsdelivr.net/fontsource/fonts/{family}@latest/{subset}-{weight}-{style}.woff2"
         return RedirectResponse(url=cdn_url, status_code=301)
     raise HTTPException(status_code=404, detail="Asset not found")
+
 
 # Mount temp directory for image cache
 temp_dir = os.path.join(os.getcwd(), "temp")
@@ -161,37 +268,91 @@ elif not app_config.expose_temp_static_files:
 else:
     logger.warning(f"Temp directory not found: {temp_dir}")
 
+
 @app.get("/", response_class=HTMLResponse)
 async def root():
     """Root endpoint - redirect to dashboard"""
     from fastapi.responses import RedirectResponse
+
     return RedirectResponse(url="/dashboard", status_code=302)
+
 
 @app.get("/favicon.ico")
 async def favicon():
     """Serve favicon"""
-    favicon_path = os.path.join(os.path.dirname(__file__), "web", "static", "images", "favicon.svg")
+    favicon_path = os.path.join(
+        os.path.dirname(__file__), "web", "static", "images", "favicon.svg"
+    )
     if os.path.exists(favicon_path):
         return FileResponse(favicon_path, media_type="image/svg+xml")
     else:
         raise HTTPException(status_code=404, detail="Favicon not found")
 
+
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
+    """Liveness: the process is up. Dependencies are not consulted."""
     return {"status": "healthy", "service": "LandPPT API"}
 
 
+@app.get("/ready")
+async def readiness_check():
+    """Readiness: database, cache/queue, and required storage must answer."""
+    from .core.readiness import assess_readiness
+
+    failures = await assess_readiness()
+    if failures:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not_ready", "dependencies": failures},
+        )
+    return {"status": "ready", "service": "LandPPT API"}
+
+
 @app.get("/metrics", response_class=PlainTextResponse)
-async def metrics():
-    """Prometheus metrics endpoint."""
-    return PlainTextResponse(metrics_collector.render_prometheus(), media_type="text/plain; version=0.0.4")
+async def metrics(request: Request):
+    """Prometheus metrics protected by a dedicated machine credential."""
+    configured_token = str(app_config.metrics_bearer_token or "").strip()
+    authorization = (request.headers.get("authorization") or "").strip()
+    supplied_token = (
+        authorization[7:].strip()
+        if authorization.lower().startswith("bearer ")
+        else ""
+    )
+    if not configured_token or not hmac.compare_digest(
+        supplied_token, configured_token
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid metrics credential",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    response = PlainTextResponse(
+        metrics_collector.render_prometheus(), media_type="text/plain; version=0.0.4"
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def main() -> None:
+    """Run the packaged LandPPT web application."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="landppt",
+        description="Run the LandPPT web application",
+    )
+    parser.add_argument("--host", default=None, help="Bind address")
+    parser.add_argument("--port", type=int, default=None, help="Bind port")
+    args = parser.parse_args()
+    uvicorn.run(
+        "landppt.main:app",
+        host=args.host or app_config.host,
+        port=args.port or app_config.port,
+        reload=app_config.reload,
+        log_level="debug" if app_config.debug else "info",
+    )
+
 
 if __name__ == "__main__":
-    uvicorn.run(
-        "src.landppt.main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info"
-    )
+    main()

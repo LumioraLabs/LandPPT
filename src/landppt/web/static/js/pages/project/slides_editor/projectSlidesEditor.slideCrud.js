@@ -497,7 +497,8 @@ function refreshSidebar() {
         thumbnailDiv.innerHTML = `
             <div class="drag-indicator top"></div>
             <div class="slide-preview">
-                <iframe title="Slide ${index + 1}"
+                <iframe title="Slide ${index + 1}" sandbox="allow-same-origin"
+                        referrerpolicy="no-referrer"
                         loading="lazy"></iframe>
             </div>
             <div class="slide-title">${index + 1}. ${slide.title}${(typeof isSvgRenderedSlide === 'function' && isSvgRenderedSlide(slide)) ? '<span class="slide-mode-badge" title="SVG 实验页">SVG</span>' : ''}</div>
@@ -518,4 +519,3 @@ function refreshSidebar() {
     initializeThumbnailEvents();
     updateSelectedSlidesUI();
 }
-

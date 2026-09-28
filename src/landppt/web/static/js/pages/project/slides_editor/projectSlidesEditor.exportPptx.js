@@ -138,6 +138,8 @@
 
                 // Use a single reusable iframe renderer to keep memory stable on large decks.
                 const renderIframe = document.createElement('iframe');
+                renderIframe.setAttribute('sandbox', 'allow-same-origin');
+                renderIframe.setAttribute('referrerpolicy', 'no-referrer');
                 renderIframe.style.cssText = 'width:1280px;height:720px;border:none;position:absolute;left:0;top:0;';
                 renderIframe.setAttribute('aria-hidden', 'true');
                 renderIframe.tabIndex = -1;
@@ -173,6 +175,8 @@
                             // Fallback: create a temporary iframe for this slide only.
                             if (!sourceDoc || !sourceDoc.body) {
                                 tempIframe = document.createElement('iframe');
+                                tempIframe.setAttribute('sandbox', 'allow-same-origin');
+                                tempIframe.setAttribute('referrerpolicy', 'no-referrer');
                                 tempIframe.style.cssText = renderIframe.style.cssText;
                                 renderHost.appendChild(tempIframe);
                                 await loadSlideIntoTempIframe(tempIframe, slide.html_content);

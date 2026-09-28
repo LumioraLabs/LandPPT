@@ -452,13 +452,19 @@ def test_outline_and_speech_stages_enforce_credits():
 
     outline = source[source.index("async def _run_outline") : source.index("async def _run_template")]
     assert 'self._require_credits("outline_generation"' in outline
-    assert 'self._charge_credits(\n            "outline_generation"' in outline
+    assert outline.index("await acquire_billable_hold") < outline.index("generate_outline_streaming")
+    assert outline.index("generate_outline_streaming") < outline.index("await commit_billable_operation")
 
     speech = source[
-        source.index("async def _run_speech_script") : source.index("async def _run_narration_audio")
+        source.index("async def _run_speech_script") : source.index("async def _count_narration_audios")
     ]
     assert 'self._require_credits("ai_other"' in speech
-    assert 'self._charge_credits(\n            "ai_other"' in speech
+    assert speech.index("await acquire_billable_hold") < speech.index(
+        "generate_multi_slide_scripts_with_retry"
+    )
+    assert speech.index("generate_multi_slide_scripts_with_retry") < speech.index(
+        "await commit_billable_operation"
+    )
 
 
 def test_workspace_stands_down_while_an_unattended_run_owns_the_project():
@@ -1324,7 +1330,8 @@ def test_migration_018_is_registered_once():
 
     versions = [migration["version"] for migration in DatabaseMigration().migrations]
     assert versions.count("018") == 1
-    assert versions[-1] == "018"
+    assert versions[-1] == "023"
+    assert "022" in versions
     assert sorted(versions) == versions, "migrations must stay in ascending order"
 
 

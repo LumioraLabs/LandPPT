@@ -66,6 +66,8 @@ function showHTMLPreview(htmlContent) {
     `;
 
     const iframe = document.createElement('iframe');
+    iframe.setAttribute('sandbox', 'allow-same-origin');
+    iframe.setAttribute('referrerpolicy', 'no-referrer');
     iframe.style.cssText = `
         width: 100%;
         height: 100%;
@@ -257,5 +259,4 @@ async function applyAgentProposal(proposal) {
     showNotification(`Agent 更改已应用并保存：第${slideIndexOneBased}页`, 'success');
     return data;
 }
-
 

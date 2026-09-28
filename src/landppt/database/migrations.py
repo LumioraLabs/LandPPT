@@ -14,177 +14,271 @@ from .models import Base, UserMetrics
 
 logger = logging.getLogger(__name__)
 
+# One PostgreSQL advisory lock shared by every migrate initContainer and the migrate Job.
+_MIGRATION_ADVISORY_LOCK_KEY = 87201364021
+
 
 class DatabaseMigration:
     """Database migration manager"""
-    
+
     def __init__(self):
         self.migrations = []
         self._register_migrations()
-    
+
     def _register_migrations(self):
         """Register all available migrations"""
         # Migration 001: Initial schema
-        self.migrations.append({
-            "version": "001",
-            "name": "initial_schema",
-            "description": "Create initial database schema",
-            "up": self._migration_001_up,
-            "down": self._migration_001_down
-        })
-        
+        self.migrations.append(
+            {
+                "version": "001",
+                "name": "initial_schema",
+                "description": "Create initial database schema",
+                "up": self._migration_001_up,
+                "down": self._migration_001_down,
+            }
+        )
+
         # Migration 002: Add indexes
-        self.migrations.append({
-            "version": "002",
-            "name": "add_indexes",
-            "description": "Add performance indexes",
-            "up": self._migration_002_up,
-            "down": self._migration_002_down
-        })
+        self.migrations.append(
+            {
+                "version": "002",
+                "name": "add_indexes",
+                "description": "Add performance indexes",
+                "up": self._migration_002_up,
+                "down": self._migration_002_down,
+            }
+        )
 
         # Migration 003: Add project_id to todo_stages
-        self.migrations.append({
-            "version": "003",
-            "name": "add_project_id_to_todo_stages",
-            "description": "Add project_id column to todo_stages table for better indexing",
-            "up": self._migration_003_up,
-            "down": self._migration_003_down
-        })
+        self.migrations.append(
+            {
+                "version": "003",
+                "name": "add_project_id_to_todo_stages",
+                "description": "Add project_id column to todo_stages table for better indexing",
+                "up": self._migration_003_up,
+                "down": self._migration_003_down,
+            }
+        )
 
         # Migration 004: Add PPT templates table
-        self.migrations.append({
-            "version": "004",
-            "name": "add_ppt_templates_table",
-            "description": "Add PPT templates table and update slide_data table",
-            "up": self._migration_004_up,
-            "down": self._migration_004_down
-        })
+        self.migrations.append(
+            {
+                "version": "004",
+                "name": "add_ppt_templates_table",
+                "description": "Add PPT templates table and update slide_data table",
+                "up": self._migration_004_up,
+                "down": self._migration_004_down,
+            }
+        )
 
         # Migration 005: Add project_metadata column to projects table
-        self.migrations.append({
-            "version": "005",
-            "name": "add_project_metadata_to_projects",
-            "description": "Add project_metadata column to projects table for storing template selection and other metadata",
-            "up": self._migration_005_up,
-            "down": self._migration_005_down
-        })
+        self.migrations.append(
+            {
+                "version": "005",
+                "name": "add_project_metadata_to_projects",
+                "description": "Add project_metadata column to projects table for storing template selection and other metadata",
+                "up": self._migration_005_up,
+                "down": self._migration_005_down,
+            }
+        )
 
         # Migration 006: Add is_user_edited field to slide_data table
-        self.migrations.append({
-            "version": "006",
-            "name": "add_is_user_edited_to_slide_data",
-            "description": "Add is_user_edited field to slide_data table to track user manual edits",
-            "up": self._migration_006_up,
-            "down": self._migration_006_down
-        })
+        self.migrations.append(
+            {
+                "version": "006",
+                "name": "add_is_user_edited_to_slide_data",
+                "description": "Add is_user_edited field to slide_data table to track user manual edits",
+                "up": self._migration_006_up,
+                "down": self._migration_006_down,
+            }
+        )
 
         # Migration 007: Add speech script language + narration audio cache
-        self.migrations.append({
-            "version": "007",
-            "name": "add_narration_audio_and_speech_language",
-            "description": "Add language column to speech_scripts and create narration_audios table",
-            "up": self._migration_007_up,
-            "down": self._migration_007_down
-        })
+        self.migrations.append(
+            {
+                "version": "007",
+                "name": "add_narration_audio_and_speech_language",
+                "description": "Add language column to speech_scripts and create narration_audios table",
+                "up": self._migration_007_up,
+                "down": self._migration_007_down,
+            }
+        )
 
         # Migration 008: Add cues_json to narration_audios for timed subtitles
-        self.migrations.append({
-            "version": "008",
-            "name": "add_narration_audio_cues_json",
-            "description": "Add cues_json column to narration_audios for subtitle timing",
-            "up": self._migration_008_up,
-            "down": self._migration_008_down
-        })
+        self.migrations.append(
+            {
+                "version": "008",
+                "name": "add_narration_audio_cues_json",
+                "description": "Add cues_json column to narration_audios for subtitle timing",
+                "up": self._migration_008_up,
+                "down": self._migration_008_down,
+            }
+        )
 
         # Migration 009: Update LandPPT default model from legacy gpt-4o to MODEL1
-        self.migrations.append({
-            "version": "009",
-            "name": "update_landppt_default_model",
-            "description": "Update system default landppt_model from gpt-4o to MODEL1",
-            "up": self._migration_009_up,
-            "down": self._migration_009_down,
-        })
+        self.migrations.append(
+            {
+                "version": "009",
+                "name": "update_landppt_default_model",
+                "description": "Update system default landppt_model from gpt-4o to MODEL1",
+                "up": self._migration_009_up,
+                "down": self._migration_009_down,
+            }
+        )
 
         # Migration 010: Add per-user ownership for global master templates
-        self.migrations.append({
-            "version": "010",
-            "name": "add_user_scope_to_global_master_templates",
-            "description": "Add user_id column/index to global_master_templates for per-user isolation",
-            "up": self._migration_010_up,
-            "down": self._migration_010_down,
-        })
+        self.migrations.append(
+            {
+                "version": "010",
+                "name": "add_user_scope_to_global_master_templates",
+                "description": "Add user_id column/index to global_master_templates for per-user isolation",
+                "up": self._migration_010_up,
+                "down": self._migration_010_down,
+            }
+        )
 
         # Migration 011: Community operations schema
-        self.migrations.append({
-            "version": "011",
-            "name": "add_community_operations_schema",
-            "description": "Add invite codes, daily check-ins, sponsor profiles, and registration source fields",
-            "up": self._migration_011_up,
-            "down": self._migration_011_down,
-        })
+        self.migrations.append(
+            {
+                "version": "011",
+                "name": "add_community_operations_schema",
+                "description": "Add invite codes, daily check-ins, sponsor profiles, and registration source fields",
+                "up": self._migration_011_up,
+                "down": self._migration_011_down,
+            }
+        )
 
         # Migration 012: User metrics summary table
-        self.migrations.append({
-            "version": "012",
-            "name": "add_user_metrics_table",
-            "description": "Add aggregated user_metrics table and backfill existing users",
-            "up": self._migration_012_up,
-            "down": self._migration_012_down,
-        })
+        self.migrations.append(
+            {
+                "version": "012",
+                "name": "add_user_metrics_table",
+                "description": "Add aggregated user_metrics table and backfill existing users",
+                "up": self._migration_012_up,
+                "down": self._migration_012_down,
+            }
+        )
 
         # Migration 013: Index hot foreign keys queried per-slide / per-request
-        self.migrations.append({
-            "version": "013",
-            "name": "add_foreign_key_indexes",
-            "description": "Index project_id (slide_data, project_versions, ppt_templates) and user_sessions.user_id",
-            "up": self._migration_013_up,
-            "down": self._migration_013_down,
-        })
+        self.migrations.append(
+            {
+                "version": "013",
+                "name": "add_foreign_key_indexes",
+                "description": "Index project_id (slide_data, project_versions, ppt_templates) and user_sessions.user_id",
+                "up": self._migration_013_up,
+                "down": self._migration_013_down,
+            }
+        )
 
         # Migration 014: Stored artifacts metadata
-        self.migrations.append({
-            "version": "014",
-            "name": "add_artifacts_table",
-            "description": "Add artifacts table for object-storage backed generated files",
-            "up": self._migration_014_up,
-            "down": self._migration_014_down,
-        })
+        self.migrations.append(
+            {
+                "version": "014",
+                "name": "add_artifacts_table",
+                "description": "Add artifacts table for object-storage backed generated files",
+                "up": self._migration_014_up,
+                "down": self._migration_014_down,
+            }
+        )
 
         # Migration 015: Persistent async task state
-        self.migrations.append({
-            "version": "015",
-            "name": "add_async_tasks_table",
-            "description": "Add async_tasks table for web/worker shared task state",
-            "up": self._migration_015_up,
-            "down": self._migration_015_down,
-        })
+        self.migrations.append(
+            {
+                "version": "015",
+                "name": "add_async_tasks_table",
+                "description": "Add async_tasks table for web/worker shared task state",
+                "up": self._migration_015_up,
+                "down": self._migration_015_down,
+            }
+        )
 
         # Migration 016: Store application metadata on artifacts
-        self.migrations.append({
-            "version": "016",
-            "name": "add_artifact_metadata_json",
-            "description": "Add metadata_json to artifacts for object-storage backed image gallery metadata",
-            "up": self._migration_016_up,
-            "down": self._migration_016_down,
-        })
+        self.migrations.append(
+            {
+                "version": "016",
+                "name": "add_artifact_metadata_json",
+                "description": "Add metadata_json to artifacts for object-storage backed image gallery metadata",
+                "up": self._migration_016_up,
+                "down": self._migration_016_down,
+            }
+        )
 
         # Migration 017: Allow long image cache task IDs
-        self.migrations.append({
-            "version": "017",
-            "name": "expand_artifact_task_id",
-            "description": "Expand artifacts.task_id to support user-scoped SHA256 image cache IDs",
-            "up": self._migration_017_up,
-            "down": self._migration_017_down,
-        })
+        self.migrations.append(
+            {
+                "version": "017",
+                "name": "expand_artifact_task_id",
+                "description": "Expand artifacts.task_id to support user-scoped SHA256 image cache IDs",
+                "up": self._migration_017_up,
+                "down": self._migration_017_down,
+            }
+        )
 
         # Migration 018: In-app notifications
-        self.migrations.append({
-            "version": "018",
-            "name": "add_notifications_table",
-            "description": "Add notifications table for in-app delivery of unattended run results",
-            "up": self._migration_018_up,
-            "down": self._migration_018_down,
-        })
+        self.migrations.append(
+            {
+                "version": "018",
+                "name": "add_notifications_table",
+                "description": "Add notifications table for in-app delivery of unattended run results",
+                "up": self._migration_018_up,
+                "down": self._migration_018_down,
+            }
+        )
+
+        # Migration 019: Idempotent credit ledger operations
+        self.migrations.append(
+            {
+                "version": "019",
+                "name": "add_credit_transaction_idempotency",
+                "description": "Add a unique idempotency key to credit transactions",
+                "up": self._migration_019_up,
+                "down": self._migration_019_down,
+            }
+        )
+
+        # Migration 020: Encrypt provider credentials already stored in plaintext
+        self.migrations.append(
+            {
+                "version": "020",
+                "name": "encrypt_stored_config_secrets",
+                "description": "Encrypt password-typed user configuration values at rest",
+                "up": self._migration_020_up,
+                "down": self._migration_020_down,
+            }
+        )
+
+        # Migration 021: Protect one-time email verification codes
+        self.migrations.append(
+            {
+                "version": "021",
+                "name": "harden_verification_codes",
+                "description": "Hash verification codes and limit validation attempts",
+                "up": self._migration_021_up,
+                "down": self._migration_021_down,
+            }
+        )
+
+        # Migration 022: Payment orders and webhook replay protection
+        self.migrations.append(
+            {
+                "version": "022",
+                "name": "add_payment_orders",
+                "description": "Add durable payment orders and webhook receipts",
+                "up": self._migration_022_up,
+                "down": self._migration_022_down,
+            }
+        )
+
+        # Migration 023: Webhook leases, support request ids, and credit reservations
+        self.migrations.append(
+            {
+                "version": "023",
+                "name": "payment_recovery_and_reservations",
+                "description": "Add webhook leases, provider request ids, and credit reservations",
+                "up": self._migration_023_up,
+                "down": self._migration_023_down,
+            }
+        )
 
     @staticmethod
     def _dialect_name(session: AsyncSession) -> str:
@@ -198,7 +292,9 @@ class DatabaseMigration:
         except Exception:
             return ""
 
-    async def _column_exists(self, session: AsyncSession, table_name: str, column_name: str) -> bool:
+    async def _column_exists(
+        self, session: AsyncSession, table_name: str, column_name: str
+    ) -> bool:
         dialect = self._dialect_name(session)
         table_name = (table_name or "").strip().lower()
         column_name = (column_name or "").strip().lower()
@@ -262,61 +358,61 @@ class DatabaseMigration:
             {"table_name": table_name},
         )
         return result.first() is not None
-    
+
     async def _migration_001_up(self, session: AsyncSession):
         """Create initial schema"""
         logger.info("Running migration 001: Creating initial schema")
-        
+
         # Create all tables
         async with async_engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        
+
         logger.info("Migration 001 completed successfully")
-    
+
     async def _migration_001_down(self, session: AsyncSession):
         """Drop initial schema"""
         logger.info("Rolling back migration 001: Dropping all tables")
-        
+
         async with async_engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
-        
+
         logger.info("Migration 001 rollback completed")
-    
+
     async def _migration_002_up(self, session: AsyncSession):
         """Add performance indexes"""
         logger.info("Running migration 002: Adding performance indexes")
-        
+
         indexes = [
             "CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status)",
             "CREATE INDEX IF NOT EXISTS idx_projects_scenario ON projects(scenario)",
             "CREATE INDEX IF NOT EXISTS idx_projects_created_at ON projects(created_at)",
             "CREATE INDEX IF NOT EXISTS idx_todo_stages_status ON todo_stages(status)",
             "CREATE INDEX IF NOT EXISTS idx_slide_data_slide_index ON slide_data(slide_index)",
-            "CREATE INDEX IF NOT EXISTS idx_project_versions_timestamp ON project_versions(timestamp)"
+            "CREATE INDEX IF NOT EXISTS idx_project_versions_timestamp ON project_versions(timestamp)",
         ]
-        
+
         for index_sql in indexes:
             await session.execute(text(index_sql))
-        
+
         await session.commit()
         logger.info("Migration 002 completed successfully")
-    
+
     async def _migration_002_down(self, session: AsyncSession):
         """Remove performance indexes"""
         logger.info("Rolling back migration 002: Removing performance indexes")
-        
+
         indexes = [
             "DROP INDEX IF EXISTS idx_projects_status",
-            "DROP INDEX IF EXISTS idx_projects_scenario", 
+            "DROP INDEX IF EXISTS idx_projects_scenario",
             "DROP INDEX IF EXISTS idx_projects_created_at",
             "DROP INDEX IF EXISTS idx_todo_stages_status",
             "DROP INDEX IF EXISTS idx_slide_data_slide_index",
-            "DROP INDEX IF EXISTS idx_project_versions_timestamp"
+            "DROP INDEX IF EXISTS idx_project_versions_timestamp",
         ]
-        
+
         for index_sql in indexes:
             await session.execute(text(index_sql))
-        
+
         await session.commit()
         logger.info("Migration 002 rollback completed")
 
@@ -328,28 +424,42 @@ class DatabaseMigration:
             # Check if project_id column already exists
             if not await self._column_exists(session, "todo_stages", "project_id"):
                 # Add project_id column to todo_stages table
-                await session.execute(text("""
+                await session.execute(
+                    text(
+                        """
                     ALTER TABLE todo_stages
                     ADD COLUMN project_id VARCHAR(36)
-                """))
+                """
+                    )
+                )
                 logger.info("Added project_id column to todo_stages")
             else:
                 logger.info("project_id column already exists in todo_stages")
 
             # Create index on project_id
-            await session.execute(text("""
+            await session.execute(
+                text(
+                    """
                 CREATE INDEX IF NOT EXISTS idx_todo_stages_project_id
                 ON todo_stages(project_id)
-            """))
+            """
+                )
+            )
 
             # Create index on stage_id for better performance
-            await session.execute(text("""
+            await session.execute(
+                text(
+                    """
                 CREATE INDEX IF NOT EXISTS idx_todo_stages_stage_id
                 ON todo_stages(stage_id)
-            """))
+            """
+                )
+            )
 
             # Populate project_id for existing records
-            await session.execute(text("""
+            await session.execute(
+                text(
+                    """
                 UPDATE todo_stages
                 SET project_id = (
                     SELECT tb.project_id
@@ -357,7 +467,9 @@ class DatabaseMigration:
                     WHERE tb.id = todo_stages.todo_board_id
                 )
                 WHERE project_id IS NULL
-            """))
+            """
+                )
+            )
 
             await session.commit()
             logger.info("Migration 003 completed successfully")
@@ -373,21 +485,29 @@ class DatabaseMigration:
 
         try:
             # Drop indexes first
-            await session.execute(text("DROP INDEX IF EXISTS idx_todo_stages_project_id"))
+            await session.execute(
+                text("DROP INDEX IF EXISTS idx_todo_stages_project_id")
+            )
             await session.execute(text("DROP INDEX IF EXISTS idx_todo_stages_stage_id"))
 
             # Remove project_id column (SQLite doesn't support DROP COLUMN directly)
             # We need to recreate the table without the column
-            await session.execute(text("""
+            await session.execute(
+                text(
+                    """
                 CREATE TABLE todo_stages_backup AS
                 SELECT id, todo_board_id, stage_id, stage_index, title, description,
                        status, progress, result, created_at, updated_at
                 FROM todo_stages
-            """))
+            """
+                )
+            )
 
             await session.execute(text("DROP TABLE todo_stages"))
 
-            await session.execute(text("""
+            await session.execute(
+                text(
+                    """
                 CREATE TABLE todo_stages (
                     id INTEGER PRIMARY KEY,
                     todo_board_id INTEGER NOT NULL,
@@ -402,12 +522,18 @@ class DatabaseMigration:
                     updated_at FLOAT,
                     FOREIGN KEY (todo_board_id) REFERENCES todo_boards(id)
                 )
-            """))
+            """
+                )
+            )
 
-            await session.execute(text("""
+            await session.execute(
+                text(
+                    """
                 INSERT INTO todo_stages
                 SELECT * FROM todo_stages_backup
-            """))
+            """
+                )
+            )
 
             await session.execute(text("DROP TABLE todo_stages_backup"))
 
@@ -450,15 +576,23 @@ class DatabaseMigration:
                 await conn.run_sync(Base.metadata.create_all, checkfirst=True)
 
             # Create indexes for ppt_templates
-            await session.execute(text("""
+            await session.execute(
+                text(
+                    """
                 CREATE INDEX IF NOT EXISTS idx_ppt_templates_project_id
                 ON ppt_templates (project_id)
-            """))
+            """
+                )
+            )
 
-            await session.execute(text("""
+            await session.execute(
+                text(
+                    """
                 CREATE INDEX IF NOT EXISTS idx_ppt_templates_type
                 ON ppt_templates (template_type)
-            """))
+            """
+                )
+            )
 
             # Add template_id column to slide_data table
             if not await self._column_exists(session, "slide_data", "template_id"):
@@ -491,16 +625,22 @@ class DatabaseMigration:
 
             # Remove template_id column from slide_data table
             # SQLite doesn't support DROP COLUMN directly, so we need to recreate the table
-            await session.execute(text("""
+            await session.execute(
+                text(
+                    """
                 CREATE TABLE slide_data_backup AS
                 SELECT id, project_id, slide_index, slide_id, title, content_type,
                        html_content, slide_metadata, created_at, updated_at
                 FROM slide_data
-            """))
+            """
+                )
+            )
 
             await session.execute(text("DROP TABLE slide_data"))
 
-            await session.execute(text("""
+            await session.execute(
+                text(
+                    """
                 CREATE TABLE slide_data (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     project_id VARCHAR(36) NOT NULL,
@@ -514,12 +654,18 @@ class DatabaseMigration:
                     updated_at FLOAT NOT NULL,
                     FOREIGN KEY (project_id) REFERENCES projects (project_id)
                 )
-            """))
+            """
+                )
+            )
 
-            await session.execute(text("""
+            await session.execute(
+                text(
+                    """
                 INSERT INTO slide_data
                 SELECT * FROM slide_data_backup
-            """))
+            """
+                )
+            )
 
             await session.execute(text("DROP TABLE slide_data_backup"))
 
@@ -534,15 +680,21 @@ class DatabaseMigration:
     async def _migration_005_up(self, session: AsyncSession):
         """Migration 005: Add project_metadata column to projects table"""
         try:
-            logger.info("Running migration 005: Adding project_metadata column to projects table")
+            logger.info(
+                "Running migration 005: Adding project_metadata column to projects table"
+            )
 
             # Check if project_metadata column already exists
             if not await self._column_exists(session, "projects", "project_metadata"):
                 # Add project_metadata column to projects table
-                await session.execute(text("""
+                await session.execute(
+                    text(
+                        """
                     ALTER TABLE projects
                     ADD COLUMN project_metadata JSON
-                """))
+                """
+                    )
+                )
                 logger.info("Added project_metadata column to projects table")
             else:
                 logger.info("project_metadata column already exists in projects table")
@@ -558,20 +710,28 @@ class DatabaseMigration:
     async def _migration_005_down(self, session: AsyncSession):
         """Migration 005 rollback: Remove project_metadata column from projects table"""
         try:
-            logger.info("Rolling back migration 005: Removing project_metadata column from projects table")
+            logger.info(
+                "Rolling back migration 005: Removing project_metadata column from projects table"
+            )
 
             # SQLite doesn't support DROP COLUMN directly, so we need to recreate the table
-            await session.execute(text("""
+            await session.execute(
+                text(
+                    """
                 CREATE TABLE projects_backup AS
                 SELECT id, project_id, title, scenario, topic, requirements, status,
                        outline, slides_html, slides_data, confirmed_requirements,
                        version, created_at, updated_at
                 FROM projects
-            """))
+            """
+                )
+            )
 
             await session.execute(text("DROP TABLE projects"))
 
-            await session.execute(text("""
+            await session.execute(
+                text(
+                    """
                 CREATE TABLE projects (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     project_id VARCHAR(36) UNIQUE NOT NULL,
@@ -588,19 +748,37 @@ class DatabaseMigration:
                     created_at FLOAT NOT NULL,
                     updated_at FLOAT NOT NULL
                 )
-            """))
+            """
+                )
+            )
 
-            await session.execute(text("""
+            await session.execute(
+                text(
+                    """
                 INSERT INTO projects
                 SELECT * FROM projects_backup
-            """))
+            """
+                )
+            )
 
             await session.execute(text("DROP TABLE projects_backup"))
 
             # Recreate indexes
-            await session.execute(text("CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status)"))
-            await session.execute(text("CREATE INDEX IF NOT EXISTS idx_projects_scenario ON projects(scenario)"))
-            await session.execute(text("CREATE INDEX IF NOT EXISTS idx_projects_created_at ON projects(created_at)"))
+            await session.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status)"
+                )
+            )
+            await session.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_projects_scenario ON projects(scenario)"
+                )
+            )
+            await session.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_projects_created_at ON projects(created_at)"
+                )
+            )
 
             await session.commit()
             logger.info("Migration 005 rollback completed")
@@ -613,16 +791,28 @@ class DatabaseMigration:
     async def _migration_006_up(self, session: AsyncSession):
         """Migration 006: Add is_user_edited field to slide_data table"""
         try:
-            logger.info("Running migration 006: Adding is_user_edited field to slide_data table")
+            logger.info(
+                "Running migration 006: Adding is_user_edited field to slide_data table"
+            )
 
             # Check if is_user_edited column already exists
             if not await self._column_exists(session, "slide_data", "is_user_edited"):
                 # Add is_user_edited column to slide_data table
-                default_value = "FALSE" if self._dialect_name(session).startswith("postgres") else "0"
-                await session.execute(text("""
+                default_value = (
+                    "FALSE"
+                    if self._dialect_name(session).startswith("postgres")
+                    else "0"
+                )
+                await session.execute(
+                    text(
+                        """
                     ALTER TABLE slide_data
                     ADD COLUMN is_user_edited BOOLEAN DEFAULT {default_value} NOT NULL
-                """.format(default_value=default_value)))
+                """.format(
+                            default_value=default_value
+                        )
+                    )
+                )
                 logger.info("Added is_user_edited column to slide_data table")
             else:
                 logger.info("is_user_edited column already exists in slide_data table")
@@ -638,19 +828,27 @@ class DatabaseMigration:
     async def _migration_006_down(self, session: AsyncSession):
         """Migration 006 rollback: Remove is_user_edited field from slide_data table"""
         try:
-            logger.info("Rolling back migration 006: Removing is_user_edited field from slide_data table")
+            logger.info(
+                "Rolling back migration 006: Removing is_user_edited field from slide_data table"
+            )
 
             # SQLite doesn't support DROP COLUMN directly, so we need to recreate the table
-            await session.execute(text("""
+            await session.execute(
+                text(
+                    """
                 CREATE TABLE slide_data_backup AS
                 SELECT id, project_id, slide_index, slide_id, title, content_type,
                        html_content, slide_metadata, template_id, created_at, updated_at
                 FROM slide_data
-            """))
+            """
+                )
+            )
 
             await session.execute(text("DROP TABLE slide_data"))
 
-            await session.execute(text("""
+            await session.execute(
+                text(
+                    """
                 CREATE TABLE slide_data (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     project_id VARCHAR(36) NOT NULL,
@@ -665,12 +863,18 @@ class DatabaseMigration:
                     updated_at FLOAT NOT NULL,
                     FOREIGN KEY (project_id) REFERENCES projects (project_id)
                 )
-            """))
+            """
+                )
+            )
 
-            await session.execute(text("""
+            await session.execute(
+                text(
+                    """
                 INSERT INTO slide_data
                 SELECT * FROM slide_data_backup
-            """))
+            """
+                )
+            )
 
             await session.execute(text("DROP TABLE slide_data_backup"))
 
@@ -684,7 +888,9 @@ class DatabaseMigration:
 
     async def _migration_007_up(self, session: AsyncSession):
         """Migration 007: Add language column to speech_scripts and create narration_audios table."""
-        logger.info("Running migration 007: Adding speech script language and narration audio cache")
+        logger.info(
+            "Running migration 007: Adding speech script language and narration audio cache"
+        )
         try:
             dialect = self._dialect_name(session)
 
@@ -699,7 +905,9 @@ class DatabaseMigration:
                     )
                 else:
                     await session.execute(
-                        text("ALTER TABLE speech_scripts ADD COLUMN language VARCHAR(10) DEFAULT 'zh'")
+                        text(
+                            "ALTER TABLE speech_scripts ADD COLUMN language VARCHAR(10) DEFAULT 'zh'"
+                        )
                     )
                 logger.info("Added language column to speech_scripts")
             else:
@@ -707,7 +915,9 @@ class DatabaseMigration:
 
             # Normalize existing rows (best-effort)
             await session.execute(
-                text("UPDATE speech_scripts SET language='zh' WHERE language IS NULL OR language=''")
+                text(
+                    "UPDATE speech_scripts SET language='zh' WHERE language IS NULL OR language=''"
+                )
             )
 
             # Index for faster lookup by project/slide/language
@@ -769,16 +979,26 @@ class DatabaseMigration:
 
     async def _migration_007_down(self, session: AsyncSession):
         """Migration 007 rollback (best-effort): Drop narration_audios and remove speech_scripts.language on SQLite."""
-        logger.info("Rolling back migration 007: Removing narration_audios and speech_scripts.language")
+        logger.info(
+            "Rolling back migration 007: Removing narration_audios and speech_scripts.language"
+        )
         try:
-            await session.execute(text("DROP INDEX IF EXISTS idx_narration_audios_project_slide_lang"))
-            await session.execute(text("DROP INDEX IF EXISTS idx_narration_audios_content_hash"))
+            await session.execute(
+                text("DROP INDEX IF EXISTS idx_narration_audios_project_slide_lang")
+            )
+            await session.execute(
+                text("DROP INDEX IF EXISTS idx_narration_audios_content_hash")
+            )
             await session.execute(text("DROP TABLE IF EXISTS narration_audios"))
-            await session.execute(text("DROP INDEX IF EXISTS idx_speech_scripts_project_slide_lang"))
+            await session.execute(
+                text("DROP INDEX IF EXISTS idx_speech_scripts_project_slide_lang")
+            )
 
             # SQLite doesn't support DROP COLUMN; recreate speech_scripts without language.
             try:
-                result = await session.execute(text("PRAGMA table_info(speech_scripts)"))
+                result = await session.execute(
+                    text("PRAGMA table_info(speech_scripts)")
+                )
                 columns = result.fetchall()
                 column_names = [col[1] for col in columns]
                 if "language" in column_names:
@@ -838,7 +1058,9 @@ class DatabaseMigration:
                     )
                     await session.execute(text("DROP TABLE speech_scripts_backup"))
             except Exception as column_error:
-                logger.warning(f"Rollback of speech_scripts.language skipped/failed: {column_error}")
+                logger.warning(
+                    f"Rollback of speech_scripts.language skipped/failed: {column_error}"
+                )
 
             await session.commit()
             logger.info("Migration 007 rollback completed")
@@ -856,14 +1078,22 @@ class DatabaseMigration:
                 return
 
             if await self._column_exists(session, "narration_audios", "cues_json"):
-                logger.info("cues_json already exists on narration_audios; skipping migration 008")
+                logger.info(
+                    "cues_json already exists on narration_audios; skipping migration 008"
+                )
                 return
 
             dialect = self._dialect_name(session)
             if dialect == "sqlite":
-                await session.execute(text("ALTER TABLE narration_audios ADD COLUMN cues_json TEXT"))
+                await session.execute(
+                    text("ALTER TABLE narration_audios ADD COLUMN cues_json TEXT")
+                )
             else:
-                await session.execute(text("ALTER TABLE narration_audios ADD COLUMN IF NOT EXISTS cues_json TEXT"))
+                await session.execute(
+                    text(
+                        "ALTER TABLE narration_audios ADD COLUMN IF NOT EXISTS cues_json TEXT"
+                    )
+                )
 
             await session.commit()
             logger.info("Migration 008 completed successfully")
@@ -884,10 +1114,14 @@ class DatabaseMigration:
             dialect = self._dialect_name(session)
             if dialect == "sqlite":
                 # SQLite doesn't support DROP COLUMN in older versions; best-effort no-op.
-                logger.warning("SQLite DROP COLUMN not supported; skipping migration 008 down")
+                logger.warning(
+                    "SQLite DROP COLUMN not supported; skipping migration 008 down"
+                )
                 return
 
-            await session.execute(text("ALTER TABLE narration_audios DROP COLUMN IF EXISTS cues_json"))
+            await session.execute(
+                text("ALTER TABLE narration_audios DROP COLUMN IF EXISTS cues_json")
+            )
             await session.commit()
             logger.info("Migration 008 rollback completed")
         except Exception as e:
@@ -897,7 +1131,9 @@ class DatabaseMigration:
 
     async def _migration_009_up(self, session: AsyncSession):
         """Migration 009: Update system default landppt_model from legacy gpt-4o to MODEL1."""
-        logger.info("Applying migration 009: Updating system default landppt_model to MODEL1")
+        logger.info(
+            "Applying migration 009: Updating system default landppt_model to MODEL1"
+        )
         try:
             if not await self._table_exists(session, "user_configs"):
                 logger.info("user_configs table not found; skipping migration 009")
@@ -931,7 +1167,9 @@ class DatabaseMigration:
 
     async def _migration_009_down(self, session: AsyncSession):
         """Migration 009 rollback (best-effort): revert system default landppt_model to gpt-4o if currently MODEL1."""
-        logger.info("Rolling back migration 009: Reverting system default landppt_model to gpt-4o (best-effort)")
+        logger.info(
+            "Rolling back migration 009: Reverting system default landppt_model to gpt-4o (best-effort)"
+        )
         try:
             if not await self._table_exists(session, "user_configs"):
                 return
@@ -967,14 +1205,20 @@ class DatabaseMigration:
         logger.info("Applying migration 010: Adding user_id to global_master_templates")
         try:
             if not await self._table_exists(session, "global_master_templates"):
-                logger.info("global_master_templates table not found; skipping migration 010")
+                logger.info(
+                    "global_master_templates table not found; skipping migration 010"
+                )
                 return
 
             dialect = self._dialect_name(session)
-            if not await self._column_exists(session, "global_master_templates", "user_id"):
+            if not await self._column_exists(
+                session, "global_master_templates", "user_id"
+            ):
                 if dialect == "sqlite":
                     await session.execute(
-                        text("ALTER TABLE global_master_templates ADD COLUMN user_id INTEGER")
+                        text(
+                            "ALTER TABLE global_master_templates ADD COLUMN user_id INTEGER"
+                        )
                     )
                 else:
                     await session.execute(
@@ -1027,25 +1271,37 @@ class DatabaseMigration:
 
     async def _migration_010_down(self, session: AsyncSession):
         """Migration 010 rollback (best-effort)."""
-        logger.info("Rolling back migration 010: Removing user scope from global_master_templates")
+        logger.info(
+            "Rolling back migration 010: Removing user scope from global_master_templates"
+        )
         try:
             if not await self._table_exists(session, "global_master_templates"):
                 return
 
-            await session.execute(text("DROP INDEX IF EXISTS idx_global_master_templates_user_id"))
-            await session.execute(text("DROP INDEX IF EXISTS uq_global_master_templates_user_name"))
-            if not await self._column_exists(session, "global_master_templates", "user_id"):
+            await session.execute(
+                text("DROP INDEX IF EXISTS idx_global_master_templates_user_id")
+            )
+            await session.execute(
+                text("DROP INDEX IF EXISTS uq_global_master_templates_user_name")
+            )
+            if not await self._column_exists(
+                session, "global_master_templates", "user_id"
+            ):
                 await session.commit()
                 return
 
             dialect = self._dialect_name(session)
             if dialect == "sqlite":
-                logger.warning("SQLite DROP COLUMN not supported; skipping migration 010 down column removal")
+                logger.warning(
+                    "SQLite DROP COLUMN not supported; skipping migration 010 down column removal"
+                )
                 await session.commit()
                 return
 
             await session.execute(
-                text("ALTER TABLE global_master_templates DROP COLUMN IF EXISTS user_id")
+                text(
+                    "ALTER TABLE global_master_templates DROP COLUMN IF EXISTS user_id"
+                )
             )
             await session.commit()
             logger.info("Migration 010 rollback completed")
@@ -1060,7 +1316,9 @@ class DatabaseMigration:
         try:
             if not await self._column_exists(session, "users", "registration_channel"):
                 await session.execute(
-                    text("ALTER TABLE users ADD COLUMN registration_channel VARCHAR(20)")
+                    text(
+                        "ALTER TABLE users ADD COLUMN registration_channel VARCHAR(20)"
+                    )
                 )
                 logger.info("Added registration_channel column to users")
 
@@ -1107,15 +1365,23 @@ class DatabaseMigration:
             await session.execute(text("DROP TABLE IF EXISTS daily_checkins"))
             await session.execute(text("DROP TABLE IF EXISTS sponsor_profiles"))
             await session.execute(text("DROP TABLE IF EXISTS invite_codes"))
-            await session.execute(text("DROP INDEX IF EXISTS idx_users_registration_channel"))
+            await session.execute(
+                text("DROP INDEX IF EXISTS idx_users_registration_channel")
+            )
             await session.execute(text("DROP INDEX IF EXISTS idx_users_invite_code_id"))
 
             dialect = self._dialect_name(session)
             if dialect.startswith("postgres"):
-                await session.execute(text("ALTER TABLE users DROP COLUMN IF EXISTS registration_channel"))
-                await session.execute(text("ALTER TABLE users DROP COLUMN IF EXISTS invite_code_id"))
+                await session.execute(
+                    text("ALTER TABLE users DROP COLUMN IF EXISTS registration_channel")
+                )
+                await session.execute(
+                    text("ALTER TABLE users DROP COLUMN IF EXISTS invite_code_id")
+                )
             else:
-                logger.warning("SQLite DROP COLUMN not supported; keeping users.registration_channel/invite_code_id")
+                logger.warning(
+                    "SQLite DROP COLUMN not supported; keeping users.registration_channel/invite_code_id"
+                )
 
             await session.commit()
             logger.info("Migration 011 rollback completed")
@@ -1129,7 +1395,11 @@ class DatabaseMigration:
         logger.info("Applying migration 012: Adding user_metrics table")
         try:
             conn = await session.connection()
-            await conn.run_sync(Base.metadata.create_all, tables=[UserMetrics.__table__], checkfirst=True)
+            await conn.run_sync(
+                Base.metadata.create_all,
+                tables=[UserMetrics.__table__],
+                checkfirst=True,
+            )
 
             user_rows = await session.execute(
                 text(
@@ -1156,7 +1426,9 @@ class DatabaseMigration:
                     ),
                     {"user_id": user_id},
                 )
-                projects_count, last_project_created_at, last_project_updated_at = project_stats.one()
+                projects_count, last_project_created_at, last_project_updated_at = (
+                    project_stats.one()
+                )
 
                 credit_stats = await session.execute(
                     text(
@@ -1190,7 +1462,9 @@ class DatabaseMigration:
                     )
                     if value is not None
                 ]
-                last_active_at = max(last_active_candidates) if last_active_candidates else now
+                last_active_at = (
+                    max(last_active_candidates) if last_active_candidates else now
+                )
 
                 existing = await session.execute(
                     text("SELECT 1 FROM user_metrics WHERE user_id = :user_id LIMIT 1"),
@@ -1500,7 +1774,11 @@ class DatabaseMigration:
             if not await self._column_exists(session, "artifacts", "metadata_json"):
                 dialect = self._dialect_name(session)
                 column_type = "JSONB" if dialect == "postgresql" else "JSON"
-                await session.execute(text(f"ALTER TABLE artifacts ADD COLUMN metadata_json {column_type} NULL"))
+                await session.execute(
+                    text(
+                        f"ALTER TABLE artifacts ADD COLUMN metadata_json {column_type} NULL"
+                    )
+                )
             await session.commit()
             logger.info("Migration 016 completed successfully")
         except Exception as e:
@@ -1513,7 +1791,9 @@ class DatabaseMigration:
         logger.info("Rolling back migration 016: Removing artifacts.metadata_json")
         try:
             if await self._column_exists(session, "artifacts", "metadata_json"):
-                await session.execute(text("ALTER TABLE artifacts DROP COLUMN metadata_json"))
+                await session.execute(
+                    text("ALTER TABLE artifacts DROP COLUMN metadata_json")
+                )
             await session.commit()
             logger.info("Migration 016 rollback completed")
         except Exception as e:
@@ -1528,9 +1808,15 @@ class DatabaseMigration:
             if await self._column_exists(session, "artifacts", "task_id"):
                 dialect = self._dialect_name(session)
                 if dialect == "postgresql":
-                    await session.execute(text("ALTER TABLE artifacts ALTER COLUMN task_id TYPE VARCHAR(128)"))
+                    await session.execute(
+                        text(
+                            "ALTER TABLE artifacts ALTER COLUMN task_id TYPE VARCHAR(128)"
+                        )
+                    )
                 else:
-                    logger.info("Migration 017: non-PostgreSQL dialect detected; skipping task_id type alteration")
+                    logger.info(
+                        "Migration 017: non-PostgreSQL dialect detected; skipping task_id type alteration"
+                    )
             await session.commit()
             logger.info("Migration 017 completed successfully")
         except Exception as e:
@@ -1543,8 +1829,12 @@ class DatabaseMigration:
         logger.info("Rolling back migration 017: Shrinking artifacts.task_id")
         try:
             dialect = self._dialect_name(session)
-            if dialect == "postgresql" and await self._column_exists(session, "artifacts", "task_id"):
-                await session.execute(text("ALTER TABLE artifacts ALTER COLUMN task_id TYPE VARCHAR(64)"))
+            if dialect == "postgresql" and await self._column_exists(
+                session, "artifacts", "task_id"
+            ):
+                await session.execute(
+                    text("ALTER TABLE artifacts ALTER COLUMN task_id TYPE VARCHAR(64)")
+                )
             await session.commit()
             logger.info("Migration 017 rollback completed")
         except Exception as e:
@@ -1632,6 +1922,404 @@ class DatabaseMigration:
             logger.error(f"Migration 018 rollback failed: {e}")
             raise
 
+    async def _migration_019_up(self, session: AsyncSession):
+        """Add unique idempotency keys for billing/credit retries."""
+        logger.info("Running migration 019: Adding credit transaction idempotency")
+        try:
+            if not await self._column_exists(
+                session, "credit_transactions", "idempotency_key"
+            ):
+                await session.execute(
+                    text(
+                        "ALTER TABLE credit_transactions "
+                        "ADD COLUMN idempotency_key VARCHAR(128) NULL"
+                    )
+                )
+            await session.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS "
+                    "uq_credit_transactions_idempotency_key "
+                    "ON credit_transactions(idempotency_key)"
+                )
+            )
+            await session.commit()
+            logger.info("Migration 019 completed successfully")
+        except Exception as e:
+            await session.rollback()
+            logger.error(f"Migration 019 failed: {e}")
+            raise
+
+    async def _migration_019_down(self, session: AsyncSession):
+        """Remove the credit transaction idempotency index/column."""
+        logger.info(
+            "Rolling back migration 019: Removing credit transaction idempotency"
+        )
+        try:
+            await session.execute(
+                text("DROP INDEX IF EXISTS uq_credit_transactions_idempotency_key")
+            )
+            if await self._column_exists(
+                session, "credit_transactions", "idempotency_key"
+            ):
+                await session.execute(
+                    text("ALTER TABLE credit_transactions DROP COLUMN idempotency_key")
+                )
+            await session.commit()
+            logger.info("Migration 019 rollback completed")
+        except Exception as e:
+            await session.rollback()
+            logger.error(f"Migration 019 rollback failed: {e}")
+            raise
+
+    async def _migration_020_up(self, session: AsyncSession):
+        """Encrypt legacy plaintext configuration secrets in place."""
+        from ..core.secret_storage import ENCRYPTED_VALUE_PREFIX, encrypt_secret
+
+        logger.info("Running migration 020: Encrypting stored configuration secrets")
+        if not await self._table_exists(session, "user_configs"):
+            logger.info("Migration 020 skipped because user_configs does not exist")
+            return
+        try:
+            result = await session.execute(
+                text(
+                    "SELECT id, config_value FROM user_configs "
+                    "WHERE config_type = 'password' "
+                    "AND config_value IS NOT NULL AND config_value <> ''"
+                )
+            )
+            migrated = 0
+            for config_id, stored_value in result.fetchall():
+                if str(stored_value).startswith(ENCRYPTED_VALUE_PREFIX):
+                    continue
+                await session.execute(
+                    text(
+                        "UPDATE user_configs SET config_value = :value, "
+                        "updated_at = :updated_at WHERE id = :config_id"
+                    ),
+                    {
+                        "value": encrypt_secret(stored_value),
+                        "updated_at": time.time(),
+                        "config_id": config_id,
+                    },
+                )
+                migrated += 1
+            await session.commit()
+            logger.info("Migration 020 encrypted %s stored secrets", migrated)
+        except Exception as e:
+            await session.rollback()
+            logger.error(f"Migration 020 failed: {e}")
+            raise
+
+    async def _migration_020_down(self, session: AsyncSession):
+        """Decrypt configuration secrets when explicitly rolling back."""
+        from ..core.secret_storage import ENCRYPTED_VALUE_PREFIX, decrypt_secret
+
+        logger.warning("Rolling back migration 020 will store secrets in plaintext")
+        if not await self._table_exists(session, "user_configs"):
+            return
+        try:
+            result = await session.execute(
+                text(
+                    "SELECT id, config_value FROM user_configs "
+                    "WHERE config_type = 'password' "
+                    "AND config_value LIKE :prefix"
+                ),
+                {"prefix": f"{ENCRYPTED_VALUE_PREFIX}%"},
+            )
+            for config_id, stored_value in result.fetchall():
+                await session.execute(
+                    text(
+                        "UPDATE user_configs SET config_value = :value, "
+                        "updated_at = :updated_at WHERE id = :config_id"
+                    ),
+                    {
+                        "value": decrypt_secret(stored_value),
+                        "updated_at": time.time(),
+                        "config_id": config_id,
+                    },
+                )
+            await session.commit()
+        except Exception as e:
+            await session.rollback()
+            logger.error(f"Migration 020 rollback failed: {e}")
+            raise
+
+    async def _migration_021_up(self, session: AsyncSession):
+        """Expand, hash, and add attempt counters to verification codes."""
+        from ..services.email_service import (
+            VERIFICATION_CODE_PREFIX,
+            _verification_code_digest,
+        )
+
+        logger.info("Running migration 021: Hardening verification codes")
+        if not await self._table_exists(session, "verification_codes"):
+            logger.info(
+                "Migration 021 skipped because verification_codes does not exist"
+            )
+            return
+        try:
+            if self._dialect_name(session) != "sqlite":
+                await session.execute(
+                    text(
+                        "ALTER TABLE verification_codes "
+                        "ALTER COLUMN code TYPE VARCHAR(128)"
+                    )
+                )
+            if not await self._column_exists(session, "verification_codes", "attempts"):
+                await session.execute(
+                    text(
+                        "ALTER TABLE verification_codes "
+                        "ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"
+                    )
+                )
+            if not await self._column_exists(
+                session, "verification_codes", "max_attempts"
+            ):
+                await session.execute(
+                    text(
+                        "ALTER TABLE verification_codes "
+                        "ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 5"
+                    )
+                )
+
+            result = await session.execute(
+                text(
+                    "SELECT id, email, code, code_type FROM verification_codes "
+                    "WHERE code IS NOT NULL AND code <> ''"
+                )
+            )
+            for code_id, email, stored_code, code_type in result.fetchall():
+                if str(stored_code).startswith(VERIFICATION_CODE_PREFIX):
+                    continue
+                await session.execute(
+                    text(
+                        "UPDATE verification_codes SET code = :code "
+                        "WHERE id = :code_id"
+                    ),
+                    {
+                        "code": _verification_code_digest(
+                            str(email), str(stored_code), str(code_type)
+                        ),
+                        "code_id": code_id,
+                    },
+                )
+            await session.commit()
+            logger.info("Migration 021 completed successfully")
+        except Exception as e:
+            await session.rollback()
+            logger.error(f"Migration 021 failed: {e}")
+            raise
+
+    async def _migration_021_down(self, session: AsyncSession):
+        """Remove attempt fields; outstanding one-time codes are invalidated."""
+        logger.info("Rolling back migration 021: Invalidating verification codes")
+        if not await self._table_exists(session, "verification_codes"):
+            return
+        try:
+            await session.execute(text("DELETE FROM verification_codes"))
+            if await self._column_exists(session, "verification_codes", "attempts"):
+                await session.execute(
+                    text("ALTER TABLE verification_codes DROP COLUMN attempts")
+                )
+            if await self._column_exists(session, "verification_codes", "max_attempts"):
+                await session.execute(
+                    text("ALTER TABLE verification_codes DROP COLUMN max_attempts")
+                )
+            if self._dialect_name(session) != "sqlite":
+                await session.execute(
+                    text(
+                        "ALTER TABLE verification_codes "
+                        "ALTER COLUMN code TYPE VARCHAR(10)"
+                    )
+                )
+            await session.commit()
+        except Exception as e:
+            await session.rollback()
+            logger.error(f"Migration 021 rollback failed: {e}")
+            raise
+
+    async def _migration_022_up(self, session: AsyncSession):
+        """Create provider-neutral payment order and webhook receipt tables."""
+        logger.info("Running migration 022: Creating payment order tables")
+        try:
+            await session.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS payment_orders (
+                        id VARCHAR(36) PRIMARY KEY,
+                        user_id INTEGER NOT NULL REFERENCES users(id),
+                        provider VARCHAR(20) NOT NULL DEFAULT 'stripe',
+                        provider_checkout_session_id VARCHAR(255) NULL UNIQUE,
+                        checkout_request_key VARCHAR(64) NOT NULL UNIQUE,
+                        checkout_url TEXT NULL,
+                        checkout_expires_at FLOAT NULL,
+                        provider_payment_id VARCHAR(255) NULL,
+                        pack_id VARCHAR(100) NOT NULL,
+                        pack_name VARCHAR(200) NOT NULL,
+                        credits_amount INTEGER NOT NULL,
+                        amount_minor INTEGER NOT NULL,
+                        charged_amount_minor INTEGER NULL,
+                        currency VARCHAR(3) NOT NULL,
+                        status VARCHAR(30) NOT NULL DEFAULT 'pending',
+                        livemode BOOLEAN NOT NULL DEFAULT FALSE,
+                        refunded_amount_minor INTEGER NOT NULL DEFAULT 0,
+                        credits_reversed INTEGER NOT NULL DEFAULT 0,
+                        created_at FLOAT NOT NULL,
+                        updated_at FLOAT NOT NULL,
+                        paid_at FLOAT NULL
+                    )
+                    """
+                )
+            )
+            await session.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS payment_webhook_events (
+                        id VARCHAR(36) PRIMARY KEY,
+                        provider VARCHAR(20) NOT NULL,
+                        event_id VARCHAR(255) NOT NULL,
+                        event_type VARCHAR(100) NOT NULL,
+                        payload_sha256 VARCHAR(64) NOT NULL,
+                        status VARCHAR(30) NOT NULL DEFAULT 'processing',
+                        attempts INTEGER NOT NULL DEFAULT 1,
+                        last_error VARCHAR(500) NULL,
+                        created_at FLOAT NOT NULL,
+                        processed_at FLOAT NULL,
+                        CONSTRAINT uq_payment_webhook_event
+                            UNIQUE (provider, event_id)
+                    )
+                    """
+                )
+            )
+            indexes = [
+                "CREATE INDEX IF NOT EXISTS idx_payment_orders_user_id ON payment_orders(user_id)",
+                "CREATE INDEX IF NOT EXISTS idx_payment_orders_status ON payment_orders(status)",
+                "CREATE INDEX IF NOT EXISTS idx_payment_orders_created_at ON payment_orders(created_at)",
+                "CREATE INDEX IF NOT EXISTS idx_payment_orders_payment_id ON payment_orders(provider_payment_id)",
+                "CREATE INDEX IF NOT EXISTS idx_payment_webhook_event_id ON payment_webhook_events(event_id)",
+                "CREATE INDEX IF NOT EXISTS idx_payment_webhook_status ON payment_webhook_events(status)",
+            ]
+            for statement in indexes:
+                await session.execute(text(statement))
+            await session.commit()
+            logger.info("Migration 022 completed successfully")
+        except Exception as e:
+            await session.rollback()
+            logger.error(f"Migration 022 failed: {e}")
+            raise
+
+    async def _migration_023_up(self, session: AsyncSession):
+        """Add webhook recovery columns and the credit reservation table."""
+        logger.info("Running migration 023: Payment recovery and credit reservations")
+        try:
+            for column, definition in (
+                ("lease_expires_at", "FLOAT NULL"),
+                ("provider_request_id", "VARCHAR(255) NULL"),
+                ("summary_json", "TEXT NULL"),
+            ):
+                if not await self._column_exists(
+                    session, "payment_webhook_events", column
+                ):
+                    await session.execute(
+                        text(
+                            "ALTER TABLE payment_webhook_events "
+                            f"ADD COLUMN {column} {definition}"
+                        )
+                    )
+            if not await self._column_exists(
+                session, "payment_orders", "provider_request_id"
+            ):
+                await session.execute(
+                    text(
+                        "ALTER TABLE payment_orders "
+                        "ADD COLUMN provider_request_id VARCHAR(255) NULL"
+                    )
+                )
+            await session.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS credit_reservations (
+                        id INTEGER PRIMARY KEY,
+                        user_id INTEGER NOT NULL REFERENCES users(id),
+                        operation_id VARCHAR(128) NOT NULL UNIQUE,
+                        operation_type VARCHAR(50) NOT NULL,
+                        quantity INTEGER NOT NULL,
+                        reserved_amount INTEGER NOT NULL,
+                        committed_amount INTEGER NOT NULL DEFAULT 0,
+                        status VARCHAR(20) NOT NULL DEFAULT 'reserved',
+                        reference_id VARCHAR(100) NULL,
+                        expires_at FLOAT NOT NULL,
+                        created_at FLOAT NOT NULL,
+                        updated_at FLOAT NOT NULL
+                    )
+                    """
+                )
+            )
+            await session.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_credit_reservations_user_id "
+                    "ON credit_reservations(user_id)"
+                )
+            )
+            await session.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_credit_reservations_status "
+                    "ON credit_reservations(status)"
+                )
+            )
+            await session.commit()
+            logger.info("Migration 023 completed successfully")
+        except Exception as e:
+            await session.rollback()
+            logger.error(f"Migration 023 failed: {e}")
+            raise
+
+    async def _migration_023_down(self, session: AsyncSession):
+        """Remove credit reservations and payment recovery columns."""
+        logger.info("Rolling back migration 023")
+        try:
+            await session.execute(text("DROP TABLE IF EXISTS credit_reservations"))
+            for table, column in (
+                ("payment_webhook_events", "summary_json"),
+                ("payment_webhook_events", "provider_request_id"),
+                ("payment_webhook_events", "lease_expires_at"),
+                ("payment_orders", "provider_request_id"),
+            ):
+                if not await self._column_exists(session, table, column):
+                    continue
+                if self._dialect_name(session) == "sqlite":
+                    indexes = await session.execute(
+                        text(
+                            "SELECT name, sql FROM sqlite_master "
+                            "WHERE type = 'index' AND tbl_name = :table"
+                        ),
+                        {"table": table},
+                    )
+                    index_rows = indexes.fetchall()
+                    for index_name, index_sql in index_rows:
+                        if index_sql and column in index_sql:
+                            await session.execute(
+                                text(f'DROP INDEX IF EXISTS "{index_name}"')
+                            )
+                await session.execute(text(f"ALTER TABLE {table} DROP COLUMN {column}"))
+            await session.commit()
+        except Exception as e:
+            await session.rollback()
+            logger.error(f"Migration 023 rollback failed: {e}")
+            raise
+
+    async def _migration_022_down(self, session: AsyncSession):
+        """Drop payment order and webhook receipt tables."""
+        logger.info("Rolling back migration 022: Removing payment order tables")
+        try:
+            await session.execute(text("DROP TABLE IF EXISTS payment_webhook_events"))
+            await session.execute(text("DROP TABLE IF EXISTS payment_orders"))
+            await session.commit()
+        except Exception as e:
+            await session.rollback()
+            logger.error(f"Migration 022 rollback failed: {e}")
+            raise
+
     async def _create_migration_table(self, session: AsyncSession):
         """Create migration tracking table"""
         create_table_sql = """
@@ -1643,133 +2331,216 @@ class DatabaseMigration:
             rollback_sql TEXT
         )
         """
-        
+
         await session.execute(text(create_table_sql))
         await session.commit()
-    
+
     async def _get_applied_migrations(self, session: AsyncSession) -> List[str]:
         """Get list of applied migration versions"""
         try:
-            result = await session.execute(text("SELECT version FROM schema_migrations ORDER BY version"))
+            result = await session.execute(
+                text("SELECT version FROM schema_migrations ORDER BY version")
+            )
             return [row[0] for row in result.fetchall()]
         except Exception:
             # Table doesn't exist yet
             return []
-    
+
     async def _record_migration(self, session: AsyncSession, migration: Dict[str, Any]):
         """Record a migration as applied"""
         insert_sql = """
         INSERT INTO schema_migrations (version, name, description, applied_at)
         VALUES (:version, :name, :description, :applied_at)
         """
-        
-        await session.execute(text(insert_sql), {
-            "version": migration["version"],
-            "name": migration["name"],
-            "description": migration["description"],
-            "applied_at": time.time()
-        })
+
+        await session.execute(
+            text(insert_sql),
+            {
+                "version": migration["version"],
+                "name": migration["name"],
+                "description": migration["description"],
+                "applied_at": time.time(),
+            },
+        )
         await session.commit()
-    
+
     async def _remove_migration_record(self, session: AsyncSession, version: str):
         """Remove migration record"""
         delete_sql = "DELETE FROM schema_migrations WHERE version = :version"
         await session.execute(text(delete_sql), {"version": version})
         await session.commit()
-    
+
+    async def _postgres_migration_lock(self, session: AsyncSession, *, release: bool) -> None:
+        """Hold a session advisory lock so concurrent PostgreSQL migrators cannot race."""
+        try:
+            bind = session.get_bind()
+        except Exception:
+            return
+        if getattr(getattr(bind, "dialect", None), "name", "") != "postgresql":
+            return
+        statement = (
+            "SELECT pg_advisory_unlock(:key)" if release else "SELECT pg_advisory_lock(:key)"
+        )
+        await session.execute(text(statement), {"key": _MIGRATION_ADVISORY_LOCK_KEY})
+        await session.commit()
+
     async def migrate_up(self, target_version: str = None) -> bool:
         """Run migrations up to target version"""
         try:
+            # A PostgreSQL session-level advisory lock belongs to one physical
+            # connection. Keep that connection checked out across the per-
+            # migration commits; otherwise the pool may hand the locked
+            # connection to another init container while this runner continues
+            # on a different connection.
+            if (
+                async_engine is not None
+                and getattr(async_engine.dialect, "name", "") == "postgresql"
+            ):
+                async with async_engine.connect() as connection:
+                    async with AsyncSession(
+                        bind=connection, expire_on_commit=False
+                    ) as session:
+                        return await self._migrate_up_with_lock(
+                            session, target_version
+                        )
             async with AsyncSessionLocal() as session:
-                # Create migration table if it doesn't exist
-                await self._create_migration_table(session)
-                
-                # Get applied migrations
-                applied = await self._get_applied_migrations(session)
-                
-                # Find migrations to apply
-                to_apply = []
-                for migration in self.migrations:
-                    if migration["version"] not in applied:
-                        to_apply.append(migration)
-                        if target_version and migration["version"] == target_version:
-                            break
-                
-                if not to_apply:
-                    logger.info("No migrations to apply")
-                    return True
-                
-                # Apply migrations
-                for migration in to_apply:
-                    logger.info(f"Applying migration {migration['version']}: {migration['name']}")
-                    
-                    try:
-                        await migration["up"](session)
-                        await self._record_migration(session, migration)
-                        logger.info(f"Migration {migration['version']} applied successfully")
-                    except Exception as e:
-                        logger.error(f"Failed to apply migration {migration['version']}: {e}")
-                        raise
-                
-                logger.info("All migrations applied successfully")
-                return True
-                
+                return await self._migrate_up_with_lock(session, target_version)
+
         except Exception as e:
             logger.error(f"Migration failed: {e}")
             return False
-    
+
+    async def _migrate_up_with_lock(
+        self, session: AsyncSession, target_version: str = None
+    ) -> bool:
+        await self._postgres_migration_lock(session, release=False)
+        try:
+            return await self._migrate_up_locked(session, target_version)
+        finally:
+            try:
+                await self._postgres_migration_lock(session, release=True)
+            except Exception:
+                logger.warning(
+                    "Failed to release the PostgreSQL migration lock",
+                    exc_info=True,
+                )
+                try:
+                    connection = await session.connection()
+                    await connection.invalidate()
+                except Exception:
+                    logger.warning(
+                        "Failed to invalidate the migration connection",
+                        exc_info=True,
+                    )
+
+    async def _migrate_up_locked(self, session: AsyncSession, target_version: str = None) -> bool:
+        """Apply pending migrations while the caller holds any database lock."""
+        # Create migration table if it doesn't exist
+        await self._create_migration_table(session)
+
+        # Get applied migrations
+        applied = await self._get_applied_migrations(session)
+
+        # Find migrations to apply
+        to_apply = []
+        for migration in self.migrations:
+            if migration["version"] not in applied:
+                to_apply.append(migration)
+                if target_version and migration["version"] == target_version:
+                    break
+
+        if not to_apply:
+            logger.info("No migrations to apply")
+            return True
+
+        # Apply migrations
+        for migration in to_apply:
+            logger.info(
+                f"Applying migration {migration['version']}: {migration['name']}"
+            )
+
+            try:
+                await migration["up"](session)
+                await self._record_migration(session, migration)
+                logger.info(
+                    f"Migration {migration['version']} applied successfully"
+                )
+            except Exception as e:
+                logger.error(
+                    f"Failed to apply migration {migration['version']}: {e}"
+                )
+                raise
+
+        logger.info("All migrations applied successfully")
+        return True
+
     async def migrate_down(self, target_version: str) -> bool:
         """Rollback migrations down to target version"""
         try:
             async with AsyncSessionLocal() as session:
                 # Get applied migrations
                 applied = await self._get_applied_migrations(session)
-                
+
                 # Find migrations to rollback
                 to_rollback = []
                 for migration in reversed(self.migrations):
-                    if migration["version"] in applied and migration["version"] > target_version:
+                    if (
+                        migration["version"] in applied
+                        and migration["version"] > target_version
+                    ):
                         to_rollback.append(migration)
-                
+
                 if not to_rollback:
                     logger.info("No migrations to rollback")
                     return True
-                
+
                 # Rollback migrations
                 for migration in to_rollback:
-                    logger.info(f"Rolling back migration {migration['version']}: {migration['name']}")
-                    
+                    logger.info(
+                        f"Rolling back migration {migration['version']}: {migration['name']}"
+                    )
+
                     try:
                         await migration["down"](session)
-                        await self._remove_migration_record(session, migration["version"])
-                        logger.info(f"Migration {migration['version']} rolled back successfully")
+                        await self._remove_migration_record(
+                            session, migration["version"]
+                        )
+                        logger.info(
+                            f"Migration {migration['version']} rolled back successfully"
+                        )
                     except Exception as e:
-                        logger.error(f"Failed to rollback migration {migration['version']}: {e}")
+                        logger.error(
+                            f"Failed to rollback migration {migration['version']}: {e}"
+                        )
                         raise
-                
+
                 logger.info("Migrations rolled back successfully")
                 return True
-                
+
         except Exception as e:
             logger.error(f"Migration rollback failed: {e}")
             return False
-    
+
     async def get_migration_status(self) -> Dict[str, Any]:
         """Get current migration status"""
         try:
             async with AsyncSessionLocal() as session:
                 await self._create_migration_table(session)
                 applied = await self._get_applied_migrations(session)
-                
+
                 status = {
                     "current_version": applied[-1] if applied else None,
                     "applied_migrations": applied,
                     "available_migrations": [m["version"] for m in self.migrations],
-                    "pending_migrations": [m["version"] for m in self.migrations if m["version"] not in applied]
+                    "pending_migrations": [
+                        m["version"]
+                        for m in self.migrations
+                        if m["version"] not in applied
+                    ],
                 }
-                
+
                 return status
-                
+
         except Exception as e:
             logger.error(f"Failed to get migration status: {e}")
             return {"error": str(e)}

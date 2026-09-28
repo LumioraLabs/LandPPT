@@ -45,9 +45,21 @@ worker:
 app:
   # Web 进程数；通常按单 Pod CPU 数设置。生产 overlay 的 web limit 为 4 核时建议 4。
   workers: 4
+  # Fail closed until public URL, hosts, proxy CIDRs, billing flags, and
+  # app.existingSecret / existingSecretKeys are supplied at install time.
+  # Required existingSecret keys (names only; never commit the values):
+  # SECRET_KEY, LANDPPT_CONFIG_ENCRYPTION_KEYS, STRIPE_SECRET_KEY,
+  # STRIPE_WEBHOOK_SECRET, LANDPPT_BILLING_CREDIT_PACKS_JSON,
+  # LANDPPT_METRICS_BEARER_TOKEN
+  production: true
   env:
+    LANDPPT_DEPLOYMENT_MODE: "production"
     LANDPPT_ENABLE_API_DOCS: "false"
     LANDPPT_ALLOW_HEADER_SESSION_AUTH: "false"
+    LANDPPT_SESSION_COOKIE_SECURE: "true"
+    LANDPPT_SESSION_COOKIE_SAMESITE: "lax"
+    LANDPPT_PASSWORD_MIN_LENGTH: "12"
+    LANDPPT_CSRF_ORIGIN_CHECK_ENABLED: "true"
     ENABLE_CREDITS_SYSTEM: "true"
     INVITE_CODE_REQUIRED_FOR_REGISTRATION: "false"
     LANDPPT_BOOTSTRAP_ADMIN_ENABLED: "false"
@@ -119,7 +131,13 @@ minio:
       cpu: "4"
       memory: 8Gi
 
+networkPolicy:
+  enabled: true
+
 migration:
+  enabled: true
+  # Pre-install hooks run before this chart's Secret and PostgreSQL StatefulSet exist.
+  hook: false
   resources:
     requests:
       cpu: 500m

@@ -22,6 +22,13 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from ...api.models import FileOutlineGenerationRequest, PPTProject
 from ...services.db_project_manager import DatabaseProjectManager
 from ...utils.thread_pool import run_blocking_io
+from ...utils.safe_fetch import (
+    read_response_limited,
+    safe_client_session,
+    safe_request,
+    validate_public_http_url,
+)
+from ...core.config import app_config
 from .support import (
     check_credits_for_operation,
     consume_credits_for_operation,
@@ -33,6 +40,23 @@ from .support import (
 
 def _is_billable_provider(provider_name: str | None) -> bool:
     return (provider_name or "").strip().lower() == "landppt"
+
+
+def _outline_reservation_quantity(confirmed_requirements: Optional[Dict[str, Any]]) -> int:
+    """Upper bound held before outline generation. Unused units are released."""
+    settings = {}
+    if isinstance(confirmed_requirements, dict):
+        raw = confirmed_requirements.get("page_count_settings") or {}
+        if isinstance(raw, dict):
+            settings = raw
+    for key in ("fixed_pages", "max_pages", "min_pages"):
+        try:
+            value = int(settings.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return min(value, 40)
+    return 8
 
 
 def _resolve_outline_llm_call_count(result: Any, default: int = 1) -> int:
@@ -830,7 +854,7 @@ def _normalize_content_source_urls(content_urls: Optional[str], max_urls: int = 
             parsed = urllib.parse.urlparse(value)
             if parsed.scheme not in ("http", "https") or not parsed.netloc:
                 continue
-            clean_url = parsed.geturl()
+            clean_url = validate_public_http_url(parsed.geturl())
         except Exception:
             continue
 
@@ -949,7 +973,8 @@ async def _url_likely_points_to_file(session: aiohttp.ClientSession, source_url:
         return True
 
     try:
-        async with session.head(source_url, allow_redirects=True) as response:
+        response = await safe_request(session, "HEAD", source_url)
+        async with response:
             if response.status >= 400:
                 return False
             return _is_supported_file_source_url(
@@ -965,10 +990,11 @@ async def _download_supported_file_from_url(
     session: aiohttp.ClientSession,
     source_url: str,
     index: int,
-    max_size_bytes: int = 100 * 1024 * 1024,
+    max_size_bytes: int = 25 * 1024 * 1024,
 ) -> Optional[Dict[str, Any]]:
     try:
-        async with session.get(source_url, allow_redirects=True) as response:
+        response = await safe_request(session, "GET", source_url)
+        async with response:
             if response.status != 200:
                 logger.warning(f"Skip URL file download (HTTP {response.status}): {source_url}")
                 return None
@@ -995,21 +1021,7 @@ async def _download_supported_file_from_url(
                 logger.warning(f"Cannot infer supported filename for URL: {source_url}")
                 return None
 
-            content_length = response.headers.get("content-length")
-            if content_length:
-                try:
-                    if int(content_length) > max_size_bytes:
-                        logger.warning(f"Skip oversized URL file (>100MB): {source_url}")
-                        return None
-                except ValueError:
-                    pass
-
-            chunks = bytearray()
-            async for chunk in response.content.iter_chunked(64 * 1024):
-                chunks.extend(chunk)
-                if len(chunks) > max_size_bytes:
-                    logger.warning(f"Skip oversized URL file while streaming (>100MB): {source_url}")
-                    return None
+            chunks = await read_response_limited(response, max_size_bytes)
 
             if not chunks:
                 logger.warning(f"Skip empty URL file response: {source_url}")
@@ -1017,7 +1029,7 @@ async def _download_supported_file_from_url(
 
             saved_path = await run_blocking_io(
                 _save_project_file_sync,
-                bytes(chunks),
+                chunks,
                 filename,
             )
             return {
@@ -1079,7 +1091,7 @@ async def _process_url_sources_for_outline(
             "User-Agent": "LandPPT Research Bot 1.0",
             "Accept": "*/*",
         }
-        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+        async with safe_client_session(timeout=timeout, headers=headers) as session:
             for idx, source_url in enumerate(source_urls, start=1):
                 likely_file_source = await _url_likely_points_to_file(session, source_url)
                 if not likely_file_source:
@@ -1090,7 +1102,7 @@ async def _process_url_sources_for_outline(
                     session=session,
                     source_url=source_url,
                     index=idx,
-                    max_size_bytes=100 * 1024 * 1024,
+                    max_size_bytes=app_config.url_source_max_file_size,
                 )
                 if downloaded:
                     downloaded_sources.append(downloaded)
@@ -1103,8 +1115,8 @@ async def _process_url_sources_for_outline(
         for downloaded in downloaded_sources:
             file_ext = Path(downloaded["filename"]).suffix.lower()
             if file_ext == ".pdf":
-                is_valid = downloaded["size"] <= 100 * 1024 * 1024
-                message = "文件大小超过限制 (100MB)" if not is_valid else "文件验证通过"
+                is_valid = downloaded["size"] <= app_config.url_source_max_file_size
+                message = "文件大小超过远程来源限制" if not is_valid else "文件验证通过"
             else:
                 is_valid, message = file_processor.validate_file(
                     downloaded["filename"],

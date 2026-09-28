@@ -150,3 +150,74 @@ Secret containing MinIO root credentials.
 {{ include "landppt.fullname" . }}-minio
 {{- end -}}
 {{- end }}
+
+{{/*
+First explicit allowed host, used as the kubelet probe Host header.
+*/}}
+{{- define "landppt.probeHost" -}}
+{{- $raw := index (.Values.app.env | default dict) "LANDPPT_ALLOWED_HOSTS" | default "" | toString -}}
+{{- $chosen := "" -}}
+{{- range $item := splitList "," $raw -}}
+{{- $host := trim $item -}}
+{{- if and (eq $chosen "") (ne $host "") (ne $host "*") (not (contains "*" $host)) -}}
+{{- $chosen = $host -}}
+{{- end -}}
+{{- end -}}
+{{- $chosen -}}
+{{- end }}
+
+{{/*
+Copy an http probe and set Host when allowed hosts are explicit.
+The root chart context is .root because this define receives a dict.
+*/}}
+{{- define "landppt.renderHttpProbe" -}}
+{{- $probe := .probe -}}
+{{- $host := include "landppt.probeHost" .root | trim -}}
+{{- $httpGet := index $probe "httpGet" | default dict -}}
+{{- if and $host (kindIs "map" $httpGet) (not (index $httpGet "httpHeaders")) -}}
+{{- $probeOut := merge (dict) $probe -}}
+{{- $http := merge (dict) $httpGet -}}
+{{- $_ := set $http "httpHeaders" (list (dict "name" "Host" "value" $host)) -}}
+{{- $_ := set $probeOut "httpGet" $http -}}
+{{- toYaml $probeOut -}}
+{{- else -}}
+{{- toYaml $probe -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Run migrations after in-chart dependencies exist. Not a Helm hook.
+*/}}
+{{- define "landppt.migrateInitContainer" -}}
+- name: migrate
+  image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+  imagePullPolicy: {{ .Values.image.pullPolicy }}
+  command:
+    - python
+    - -m
+    - landppt.cli
+    - migrate-and-bootstrap
+  envFrom:
+    - configMapRef:
+        name: {{ include "landppt.fullname" . }}
+    - secretRef:
+        name: {{ include "landppt.fullname" . }}
+    {{- if .Values.app.existingSecret }}
+    - secretRef:
+        name: {{ .Values.app.existingSecret }}
+    {{- end }}
+    {{- if .Values.storage.s3.existingSecret }}
+    - secretRef:
+        name: {{ .Values.storage.s3.existingSecret }}
+    {{- end }}
+  env:
+    {{- include "landppt.databaseEnv" . | nindent 4 }}
+  {{- with .Values.securityContext }}
+  securityContext:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.migration.resources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

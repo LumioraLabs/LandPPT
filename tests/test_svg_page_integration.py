@@ -247,7 +247,14 @@ async def test_batch_regeneration_preserves_svg_and_refreshes_failure_status(
     monkeypatch.setattr(
         routes, "check_credits_for_operation", AsyncMock(return_value=(True, 0, 0))
     )
-    monkeypatch.setattr(routes, "consume_credits_for_operation", AsyncMock())
+    monkeypatch.setattr(
+        routes,
+        "reserve_billable_operation",
+        AsyncMock(return_value=(True, "skipped", "skipped")),
+    )
+    monkeypatch.setattr(
+        routes, "commit_billable_operation", AsyncMock(return_value=(True, "ok"))
+    )
     response = await routes._do_batch_regenerate(
         "p",
         routes.SlideBatchRegenerateRequest(regenerate_all=True),

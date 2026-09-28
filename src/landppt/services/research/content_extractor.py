@@ -14,7 +14,12 @@ from urllib.parse import urljoin, urlparse
 import aiohttp
 from bs4 import BeautifulSoup, Comment
 
-from ...core.config import ai_config
+from ...core.config import ai_config, app_config
+from ...utils.safe_fetch import (
+    read_response_limited,
+    safe_client_session,
+    safe_request,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +53,7 @@ class WebContentExtractor:
     
     def __init__(self):
         self.timeout = ai_config.research_extraction_timeout
-        # Do not cap extracted content length.
-        self.max_content_length = None
+        self.max_content_length = max(1, int(ai_config.research_max_content_length))
         self.user_agent = "LandPPT Research Bot 1.0"
         # If aggressive cleanup leaves too little text, fallback to relaxed extraction.
         self.min_usable_words = 80
@@ -209,11 +213,12 @@ class WebContentExtractor:
                 'Connection': 'keep-alive',
             }
             
-            async with aiohttp.ClientSession(
+            async with safe_client_session(
                 timeout=aiohttp.ClientTimeout(total=self.timeout),
                 headers=headers
             ) as session:
-                async with session.get(url) as response:
+                response = await safe_request(session, "GET", url)
+                async with response:
                     if response.status != 200:
                         logger.warning(f"Failed to fetch {url}: HTTP {response.status}")
                         return None
@@ -224,7 +229,12 @@ class WebContentExtractor:
                         logger.warning(f"Skipping non-HTML content: {url}")
                         return None
                     
-                    html_content = await response.text()
+                    raw_content = await read_response_limited(
+                        response,
+                        app_config.remote_html_max_bytes,
+                    )
+                    encoding = response.charset or "utf-8"
+                    html_content = raw_content.decode(encoding, errors="replace")
             
             # Parse HTML
             soup = BeautifulSoup(html_content, 'html.parser')
@@ -234,6 +244,8 @@ class WebContentExtractor:
             
             # Extract main content
             content = self._extract_main_content(soup)
+            if len(content) > self.max_content_length:
+                content = content[: self.max_content_length].rstrip()
             
             # Get title
             title = metadata.get('title', '')

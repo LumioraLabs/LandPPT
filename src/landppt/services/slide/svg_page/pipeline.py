@@ -118,8 +118,10 @@ def build_placeholder_svg(
     """生成彻底失败时的占位页：只承载标题与要点，并明确标注需要重新生成。"""
     safe_title = html_lib.escape(title or f"第{page_number}页", quote=True)
     lines = [html_lib.escape(str(p), quote=True) for p in list(points)[:6]]
+    # Title block is capped at two lines (y=112, line height ~40). Bullets start
+    # below that cap so a long title cannot overlap the first point.
     body = "".join(
-        f'<text x="96" y="{240 + i * 44}" font-size="24" fill="#cbd5e1" data-box-w="1088">• {line}</text>'
+        f'<text x="96" y="{250 + i * 52}" font-size="22" fill="#cbd5e1" data-box-w="1088">• {line}</text>'
         for i, line in enumerate(lines)
     )
     note_text = html_lib.escape(
@@ -128,9 +130,9 @@ def build_placeholder_svg(
     return (
         f'<svg xmlns="{SVG_NS}" viewBox="0 0 {CANVAS_WIDTH} {CANVAS_HEIGHT}" width="{CANVAS_WIDTH}" height="{CANVAS_HEIGHT}">'
         f'<g {ROLE_ATTR}="background"><rect width="{CANVAS_WIDTH}" height="{CANVAS_HEIGHT}" fill="#0f172a"/></g>'
-        f'<g {ROLE_ATTR}="{ROLE_TITLE}"><text x="96" y="140" font-size="44" font-weight="bold" fill="#f8fafc" data-box-w="1088">{safe_title}</text></g>'
+        f'<g {ROLE_ATTR}="{ROLE_TITLE}"><text x="96" y="112" font-size="36" font-weight="bold" fill="#f8fafc" data-box-w="1088" data-box-h="96">{safe_title}</text></g>'
         f'<g {ROLE_ATTR}="{ROLE_STAGE}">{body}</g>'
-        f'<g {ROLE_ATTR}="footer"><text x="96" y="690" font-size="16" fill="#f59e0b">{note_text}</text>'
-        f'<text x="1200" y="690" font-size="16" fill="#94a3b8" text-anchor="end">{page_number} / {total_pages}</text></g>'
+        f'<g {ROLE_ATTR}="footer"><text x="96" y="668" font-size="16" fill="#f59e0b" data-box-w="860">{note_text}</text>'
+        f'<text x="1184" y="668" font-size="16" fill="#94a3b8" text-anchor="end">{page_number} / {total_pages}</text></g>'
         "</svg>"
     )

@@ -10,6 +10,8 @@ from urllib.parse import quote
 import logging
 
 from .auth_service import get_auth_service, AuthService
+from .cookies import set_session_cookie
+from .security import safe_local_redirect
 from .middleware import get_current_user
 from ..database.database import get_db
 
@@ -63,7 +65,7 @@ async def github_login(
     await store_oauth_state(
         state,
         code_verifier,
-        redirect_url,
+        safe_local_redirect(redirect_url),
         callback_url=callback_url,
         invite_code=invite_code,
     )
@@ -128,7 +130,7 @@ async def github_callback(
         )
     
     code_verifier = state_data.get("code_verifier")
-    redirect_url = state_data.get("redirect_url", "/dashboard")
+    redirect_url = safe_local_redirect(state_data.get("redirect_url"))
     callback_url = state_data.get("callback_url") or get_callback_url(request)
     invite_code = state_data.get("invite_code")
     
@@ -178,14 +180,7 @@ async def github_callback(
     current_expire_minutes = auth_service._get_current_expire_minutes()
     cookie_max_age = None if current_expire_minutes == 0 else current_expire_minutes * 60
     
-    response.set_cookie(
-        key="session_id",
-        value=session_id,
-        max_age=cookie_max_age,
-        httponly=True,
-        secure=False,  # Set to True in production with HTTPS
-        samesite="lax"
-    )
+    set_session_cookie(response, session_id, max_age=cookie_max_age)
     
     logger.info(f"User {user.username} logged in via GitHub OAuth (github_id={github_user['id']})")
     return response

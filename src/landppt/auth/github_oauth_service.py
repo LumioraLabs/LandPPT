@@ -64,20 +64,10 @@ def _build_callback_url_from_request(request) -> Optional[str]:
     if not request:
         return None
     try:
-        headers = request.headers
-        host = (headers.get("x-forwarded-host") or headers.get("host") or request.url.netloc or "").strip()
-        if "," in host:
-            host = host.split(",", 1)[0].strip()
+        from .request_context import resolve_request_base_url
 
-        scheme = (headers.get("x-forwarded-proto") or request.url.scheme or "http").strip()
-        if "," in scheme:
-            scheme = scheme.split(",", 1)[0].strip()
-        scheme = scheme.lower()
-
-        if not host:
-            return None
-        host = _strip_default_port(host, scheme)
-        return f"{scheme}://{host}/auth/github/callback"
+        base_url = resolve_request_base_url(request)
+        return f"{base_url}/auth/github/callback" if base_url else None
     except Exception:
         return None
 
@@ -464,9 +454,7 @@ def get_or_create_user_by_github(
             username = f"{github_login}_{secrets.token_hex(4)}"
         
         # Get default credits for new users if credits system is enabled
-        default_credits = 0
-        if app_config.enable_credits_system:
-            default_credits = app_config.default_credits_for_new_users
+        default_credits = app_config.default_credits_for_new_users
         
         # Create user with a random password (OAuth users can't login with password)
         new_user = User(
@@ -482,8 +470,8 @@ def get_or_create_user_by_github(
             created_at=time.time(),
             last_login=time.time()
         )
-        # Set a random password hash (can't be used for login)
-        new_user.password_hash = hashlib.sha256(secrets.token_bytes(32)).hexdigest()
+        # Set an unknown high-entropy password (OAuth users cannot use it).
+        new_user.set_password(secrets.token_urlsafe(48))
         
         db.add(new_user)
         db.flush()

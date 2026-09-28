@@ -36,11 +36,16 @@ from ...services.pyppeteer_pdf_converter import get_pdf_converter
 from ...utils.thread_pool import run_blocking_io, to_thread
 from .support import (
     _apply_no_store_headers,
+    billable_operation_id,
+    billable_work_may_start,
+    acquire_billable_hold,
     check_credits_for_operation,
-    consume_credits_for_operation,
+    commit_billable_operation,
     get_ppt_service_for_user,
     logger,
     ppt_service,
+    release_billable_operation,
+    reserve_billable_operation,
     templates,
 )
 
@@ -252,6 +257,33 @@ async def ai_slide_edit(
                 "success": False,
                 "error": f"积分不足，AI编辑需要 {required} 积分，当前余额 {balance} 积分"
             }
+        edit_operation_id = billable_operation_id(
+            "ai-slide-edit",
+            user.id,
+            request.projectInfo.get("project_id") or request.projectInfo.get("id") or "",
+            request.slideIndex,
+            request.userRequest,
+        )
+        reserved, reserve_message, reserve_state = await reserve_billable_operation(
+            user.id,
+            edit_operation_id,
+            "ai_edit",
+            1,
+            reference_id=str(
+                request.projectInfo.get("project_id") or request.projectInfo.get("id") or ""
+            ),
+            provider_name=editor_provider_name,
+        )
+        if not billable_work_may_start(reserve_state):
+            if reserve_state == "committed":
+                return {"success": True, "response": "", "already_completed": True}
+            return {
+                "success": False,
+                "error": reserve_message,
+                "in_progress": reserve_state == "reserved",
+            }
+        if reserve_state != "created":
+            edit_operation_id = None
 
         # 获取AI提供者（已在积分校验前获取）
 
@@ -328,14 +360,9 @@ async def ai_slide_edit(
             if html_match:
                 new_html_content = html_match.group(1).strip()
 
-        await consume_credits_for_operation(
-            user.id,
-            "ai_edit",
-            1,
-            description=f"AI编辑: 第{request.slideIndex}页 {request.slideTitle}",
-            reference_id=str(request.projectInfo.get("project_id") or request.projectInfo.get("id") or ""),
-            provider_name=editor_provider_name,
-        )
+        if edit_operation_id and reserve_state == "created":
+            await commit_billable_operation(edit_operation_id, 1)
+            reserve_state = "committed"
 
         return {
             "success": True,
@@ -343,7 +370,13 @@ async def ai_slide_edit(
             "newHtmlContent": new_html_content
         }
 
+    except asyncio.CancelledError:
+        if locals().get("edit_operation_id"):
+            await release_billable_operation(edit_operation_id, "cancelled")
+        raise
     except Exception as e:
+        if locals().get("edit_operation_id"):
+            await release_billable_operation(edit_operation_id, "failure")
         logger.error(f"AI编辑请求失败: {e}")
         return {
             "success": False,
@@ -358,6 +391,8 @@ async def ai_element_edit(
     user: User = Depends(get_current_user_required)
 ):
     """AI element-level editing endpoint (returns updated element HTML only)."""
+    element_operation_id = None
+    reserve_state = "skipped"
     try:
         user_ppt_service = get_ppt_service_for_user(user.id)
         role = "polish"
@@ -372,6 +407,35 @@ async def ai_element_edit(
                 "success": False,
                 "error": f"积分不足，AI编辑需要 {required} 积分，当前余额 {balance} 积分"
             }
+
+        element_operation_id = billable_operation_id(
+            "ai-element-edit",
+            user.id,
+            request.projectInfo.get("project_id") or request.projectInfo.get("id") or "",
+            request.slideIndex,
+            request.elementId,
+            request.userRequest,
+        )
+        reserved, reserve_message, reserve_state = await reserve_billable_operation(
+            user.id,
+            element_operation_id,
+            "ai_edit",
+            1,
+            reference_id=str(
+                request.projectInfo.get("project_id") or request.projectInfo.get("id") or ""
+            ),
+            provider_name=polish_provider_name,
+        )
+        if not billable_work_may_start(reserve_state):
+            if reserve_state == "committed":
+                return {"success": True, "updated_element_html": "", "already_completed": True}
+            return {
+                "success": False,
+                "error": reserve_message,
+                "in_progress": reserve_state == "reserved",
+            }
+        if reserve_state != "created":
+            element_operation_id = None
 
         outline_info = ""
         if request.slideOutline:
@@ -473,20 +537,16 @@ Constraints:
 
         updated_element_html = _sanitize_single_root_element(ai_response, request.elementId)
         if not updated_element_html:
+            if element_operation_id and reserve_state == "created":
+                await release_billable_operation(element_operation_id, "no html")
             return {
                 "success": False,
                 "error": "AI 返回内容中未能提取到有效的元素 HTML",
                 "full_response": ai_response,
             }
 
-        await consume_credits_for_operation(
-            user.id,
-            "ai_edit",
-            1,
-            description=f"AI元素编辑: 第{request.slideIndex}页 {request.slideTitle}",
-            reference_id=str(request.projectInfo.get("project_id") or request.projectInfo.get("id") or ""),
-            provider_name=polish_provider_name,
-        )
+        if element_operation_id and reserve_state == "created":
+            await commit_billable_operation(element_operation_id, 1)
 
         return {
             "success": True,
@@ -494,7 +554,13 @@ Constraints:
             "full_response": ai_response,
         }
 
+    except asyncio.CancelledError:
+        if element_operation_id and reserve_state == "created":
+            await release_billable_operation(element_operation_id, "cancelled")
+        raise
     except Exception as e:
+        if element_operation_id and reserve_state == "created":
+            await release_billable_operation(element_operation_id, "failure")
         logger.error(f"AI element edit failed: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
@@ -643,6 +709,37 @@ async def ai_slide_edit_stream(
 
         messages = SystemPrompts.normalize_messages_for_cache(messages)
 
+        stream_operation_id = billable_operation_id(
+            "ai-slide-edit-stream",
+            user.id,
+            request.projectInfo.get("project_id") or request.projectInfo.get("id") or "",
+            request.slideIndex,
+            request.userRequest,
+        )
+        stream_reserved, stream_message, stream_state = await reserve_billable_operation(
+            user.id,
+            stream_operation_id,
+            "ai_edit",
+            1,
+            reference_id=str(
+                request.projectInfo.get("project_id") or request.projectInfo.get("id") or ""
+            ),
+            provider_name=editor_provider_name,
+        )
+        if not stream_reserved or not billable_work_may_start(stream_state):
+            async def blocked_stream():
+                yield f"data: {json.dumps({'type': 'error', 'content': '', 'error': stream_message, 'in_progress': stream_state == 'reserved', 'already_completed': stream_state == 'committed'})}\n\n"
+
+            return StreamingResponse(
+                blocked_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
         async def generate_ai_stream():
             try:
                 # 发送开始信号
@@ -698,18 +795,18 @@ async def ai_slide_edit_stream(
                     logger.debug(f"AI完整响应: {full_response[:500]}...")
 
                 # 发送完成信号
+                if stream_state == "created":
+                    await commit_billable_operation(stream_operation_id, 1)
+
                 yield f"data: {json.dumps({'type': 'complete', 'content': '', 'newHtmlContent': new_html_content, 'fullResponse': full_response})}\n\n"
 
-                await consume_credits_for_operation(
-                    user.id,
-                    "ai_edit",
-                    1,
-                    description=f"AI编辑(流式): 第{request.slideIndex}页 {request.slideTitle}",
-                    reference_id=str(request.projectInfo.get("project_id") or request.projectInfo.get("id") or ""),
-                    provider_name=editor_provider_name,
-                )
-
+            except asyncio.CancelledError:
+                if stream_state == "created":
+                    await release_billable_operation(stream_operation_id, "cancelled")
+                raise
             except Exception as e:
+                if stream_state == "created":
+                    await release_billable_operation(stream_operation_id, "failure")
                 logger.error(f"AI流式编辑请求失败: {e}")
                 yield f"data: {json.dumps({'type': 'error', 'content': '', 'error': str(e)})}\n\n"
 
@@ -816,6 +913,48 @@ async def ai_slide_native_dialog_stream(
 
         messages = SystemPrompts.normalize_messages_for_cache(messages)
 
+        dialog_operation_id = billable_operation_id(
+            "ai-native-dialog",
+            user.id,
+            request.slideIndex,
+            request.userRequest,
+        )
+        proceed, reserve_message, reserve_state, dialog_owned = await acquire_billable_hold(
+            user.id,
+            dialog_operation_id,
+            "ai_other",
+            1,
+            reference_id=str(request.slideIndex),
+            provider_name=dialog_provider_name,
+        )
+        if not proceed:
+            async def blocked_dialog():
+                yield (
+                    "data: "
+                    + json.dumps(
+                        {
+                            "type": "error",
+                            "content": "",
+                            "error": reserve_message,
+                            "in_progress": reserve_state == "reserved",
+                            "already_completed": reserve_state == "committed",
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n\n"
+                )
+
+            return StreamingResponse(
+                blocked_dialog(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Headers": "Cache-Control",
+                },
+            )
+
         async def generate_ai_stream():
             try:
                 yield f"data: {json.dumps({'type': 'start', 'content': ''})}\n\n"
@@ -844,18 +983,18 @@ async def ai_slide_native_dialog_stream(
                         full_response = response.content
                         yield f"data: {json.dumps({'type': 'content', 'content': response.content})}\n\n"
 
+                if dialog_owned:
+                    await commit_billable_operation(dialog_owned, 1)
+
                 yield f"data: {json.dumps({'type': 'complete', 'content': '', 'fullResponse': full_response})}\n\n"
 
-                await consume_credits_for_operation(
-                    user.id,
-                    "ai_other",
-                    1,
-                    description=f"AI自由对话(流式): 第{request.slideIndex}页 {request.slideTitle}",
-                    reference_id="",
-                    provider_name=dialog_provider_name,
-                )
-
+            except asyncio.CancelledError:
+                if dialog_owned:
+                    await release_billable_operation(dialog_owned, "cancelled")
+                raise
             except Exception as e:
+                if dialog_owned:
+                    await release_billable_operation(dialog_owned, "failure")
                 logger.error(f"AI自由对话流式请求失败: {e}")
                 yield f"data: {json.dumps({'type': 'error', 'content': '', 'error': str(e)})}\n\n"
 
@@ -906,7 +1045,31 @@ async def ai_optimize_outline(
                 "success": False,
                 "error": f"积分不足，需要 {required} 积分，当前余额 {balance} 积分"
             }
-        
+
+        optimize_operation_id = billable_operation_id(
+            "outline-optimize",
+            user.id,
+            request.optimization_type,
+            request.slide_index,
+            request.outline_content,
+            request.user_request,
+        )
+        proceed, reserve_message, reserve_state, optimize_owned = await acquire_billable_hold(
+            user.id,
+            optimize_operation_id,
+            "ai_other",
+            1,
+            reference_id=str(request.project_info.get("project_id") or request.project_info.get("id") or ""),
+            provider_name=optimize_provider_name,
+        )
+        if not proceed:
+            return {
+                "success": reserve_state == "committed",
+                "already_completed": reserve_state == "committed",
+                "in_progress": reserve_state == "reserved",
+                "error": reserve_message,
+            }
+
         # 统一使用服务层解析器，避免 fenced JSON 或轻微脏 JSON 被误判失败。
         try:
             project_topic = (
@@ -1132,7 +1295,8 @@ async def ai_optimize_outline(
         try:
             optimized_data = json.loads(optimized_json)
         except json.JSONDecodeError as e:
-            # 提供更详细的错误信息，帮助调试
+            if optimize_owned:
+                await release_billable_operation(optimize_owned, "invalid json")
             return {
                 "success": False,
                 "error": f"AI返回的内容不是有效的JSON格式: {str(e)}",
@@ -1140,14 +1304,8 @@ async def ai_optimize_outline(
                 "extracted_json": optimized_json[:500] if len(optimized_json) > 500 else optimized_json
             }
 
-        await consume_credits_for_operation(
-            user.id,
-            "ai_other",
-            1,
-            description="AI优化大纲",
-            reference_id="",
-            provider_name=optimize_provider_name,
-        )
+        if optimize_owned:
+            await commit_billable_operation(optimize_owned, 1)
 
         return {
             "success": True,
@@ -1156,7 +1314,13 @@ async def ai_optimize_outline(
             "raw_response": ai_response
         }
         
+    except asyncio.CancelledError:
+        if locals().get("optimize_owned"):
+            await release_billable_operation(optimize_owned, "cancelled")
+        raise
     except Exception as e:
+        if locals().get("optimize_owned"):
+            await release_billable_operation(optimize_owned, "failure")
         logger.error(f"AI优化大纲请求失败: {e}")
         return {
             "success": False,
@@ -1170,6 +1334,8 @@ async def ai_regenerate_image(
     user: User = Depends(get_current_user_required)
 ):
     """AI重新生成图像接口 - 完全遵循enhanced_ppt_service.py的标准流程"""
+    image_owned = None
+    image_settled = False
     try:
         # 获取图像服务和AI提供者
         from ...services.image.image_service import get_image_service
@@ -1197,6 +1363,28 @@ async def ai_regenerate_image(
             return {
                 "success": False,
                 "message": f"积分不足，需要 {required} 积分，当前余额 {balance} 积分"
+            }
+        image_operation_id = billable_operation_id(
+            "ai-image-regenerate",
+            user.id,
+            request.slide_index,
+            request.project_topic,
+            request.image_info.get("id") or request.image_info.get("src") or request.image_info.get("alt") or "",
+        )
+        proceed, reserve_message, reserve_state, image_owned = await acquire_billable_hold(
+            user.id,
+            image_operation_id,
+            "ai_other",
+            1,
+            reference_id=str(request.slide_index),
+            provider_name=billing_provider_name,
+        )
+        if not proceed:
+            return {
+                "success": reserve_state == "committed",
+                "already_completed": reserve_state == "committed",
+                "in_progress": reserve_state == "reserved",
+                "message": reserve_message,
             }
         ai_provider = await get_user_ai_provider(user.id)
         if not ai_provider:
@@ -1351,14 +1539,9 @@ async def ai_regenerate_image(
 
         logger.info(f"图片重新生成成功: {new_image.source.value}来源, URL: {new_image_url}")
 
-        await consume_credits_for_operation(
-            user.id,
-            "ai_other",
-            1,
-            description="AI重新生成图片",
-            reference_id="",
-            provider_name=billing_provider_name,
-        )
+        if image_owned:
+            await commit_billable_operation(image_owned, 1)
+        image_settled = True
 
         return {
             "success": True,
@@ -1385,6 +1568,8 @@ async def ai_regenerate_image(
             }
         }
 
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logger.error(f"AI图像重新生成失败: {e}")
         import traceback
@@ -1393,6 +1578,9 @@ async def ai_regenerate_image(
             "success": False,
             "message": f"图像重新生成失败: {str(e)}"
         }
+    finally:
+        if image_owned and not image_settled:
+            await release_billable_operation(image_owned, "failure")
 
 
 @router.post("/api/ai/auto-generate-slide-images")
@@ -1401,6 +1589,8 @@ async def ai_auto_generate_slide_images(
     user: User = Depends(get_current_user_required)
 ):
     """AI一键配图接口 - 自动分析幻灯片内容并生成相关配图"""
+    auto_image_owned = None
+    auto_image_settled = False
     try:
         # 获取图像服务和AI提供者
         from ...services.image.image_service import get_image_service
@@ -1424,6 +1614,28 @@ async def ai_auto_generate_slide_images(
             return {
                 "success": False,
                 "message": f"积分不足，需要 {required} 积分，当前余额 {balance} 积分"
+            }
+        auto_image_operation_id = billable_operation_id(
+            "ai-auto-images",
+            user.id,
+            request.slide_index,
+            request.project_topic,
+            (request.slide_content or {}).get("title") or "",
+        )
+        proceed, reserve_message, reserve_state, auto_image_owned = await acquire_billable_hold(
+            user.id,
+            auto_image_operation_id,
+            "ai_other",
+            1,
+            reference_id=str(request.slide_index),
+            provider_name=billing_provider_name,
+        )
+        if not proceed:
+            return {
+                "success": reserve_state == "committed",
+                "already_completed": reserve_state == "committed",
+                "in_progress": reserve_state == "reserved",
+                "message": reserve_message,
             }
         ai_provider = await get_user_ai_provider(user.id)
         if not ai_provider:
@@ -1567,14 +1779,9 @@ AI生成图片可选尺寸（只能从中选择）：
             }
 
         if not analysis_result.get("needs_images", False):
-            await consume_credits_for_operation(
-                user.id,
-                "ai_other",
-                1,
-                description=f"AI一键配图(仅分析): 第{request.slide_index + 1}页 {slide_title}",
-                reference_id="",
-                provider_name=billing_provider_name,
-            )
+            if auto_image_owned:
+                await commit_billable_operation(auto_image_owned, 1)
+            auto_image_settled = True
             return {
                 "success": True,
                 "message": "AI分析认为此幻灯片不需要配图",
@@ -1693,14 +1900,9 @@ AI生成图片可选尺寸（只能从中选择）：
 
         logger.info(f"一键配图完成: 生成{len(images_collection.images)}张图片")
 
-        await consume_credits_for_operation(
-            user.id,
-            "ai_other",
-            1,
-            description=f"AI一键配图: 第{request.slide_index + 1}页 {slide_title}",
-            reference_id="",
-            provider_name=billing_provider_name,
-        )
+        if auto_image_owned:
+            await commit_billable_operation(auto_image_owned, 1)
+        auto_image_settled = True
 
         return {
             "success": True,
@@ -1718,12 +1920,17 @@ AI生成图片可选尺寸（只能从中选择）：
             "ai_analysis": analysis_result
         }
 
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logger.error(f"AI一键配图失败: {e}")
         return {
             "success": False,
             "message": f"一键配图失败: {str(e)}"
         }
+    finally:
+        if auto_image_owned and not auto_image_settled:
+            await release_billable_operation(auto_image_owned, "failure")
 
 
 @router.post("/api/ai/enhance-bullet-point")
@@ -1745,6 +1952,29 @@ async def ai_enhance_bullet_point(
             return {
                 "success": False,
                 "error": f"积分不足，需要 {required} 积分，当前余额 {balance} 积分"
+            }
+
+        bullet_operation_id = billable_operation_id(
+            "ai-bullet",
+            user.id,
+            request.slideIndex,
+            request.userRequest,
+            (request.contextInfo or {}).get("originalBulletPoint") or "",
+        )
+        proceed, reserve_message, reserve_state, bullet_owned = await acquire_billable_hold(
+            user.id,
+            bullet_operation_id,
+            "ai_edit",
+            1,
+            reference_id=str(request.projectInfo.get("project_id") or request.projectInfo.get("id") or ""),
+            provider_name=enhance_provider_name,
+        )
+        if not proceed:
+            return {
+                "success": reserve_state == "committed",
+                "already_completed": reserve_state == "committed",
+                "in_progress": reserve_state == "reserved",
+                "error": reserve_message,
             }
 
         # 构建上下文信息
@@ -1811,14 +2041,9 @@ async def ai_enhance_bullet_point(
         if not enhanced_text or len(enhanced_text) < 5:
             raise ValueError("AI生成的增强内容过短或为空")
 
-        await consume_credits_for_operation(
-            user.id,
-            "ai_edit",
-            1,
-            description=f"AI要点增强: 第{request.slideIndex}页 {request.slideTitle}",
-            reference_id=str(request.projectInfo.get("project_id") or request.projectInfo.get("id") or ""),
-            provider_name=enhance_provider_name,
-        )
+        if bullet_owned:
+            await commit_billable_operation(bullet_owned, 1)
+            bullet_owned = None
 
         return {
             "success": True,
@@ -1826,7 +2051,13 @@ async def ai_enhance_bullet_point(
             "originalText": request.contextInfo.get('originalBulletPoint', '') if request.contextInfo else ""
         }
 
+    except asyncio.CancelledError:
+        if locals().get("bullet_owned"):
+            await release_billable_operation(bullet_owned, "cancelled")
+        raise
     except Exception as e:
+        if locals().get("bullet_owned"):
+            await release_billable_operation(bullet_owned, "failure")
         logger.error(f"AI要点增强请求失败: {e}")
         return {
             "success": False,
@@ -1854,6 +2085,30 @@ async def ai_enhance_all_bullet_points(
             return {
                 "success": False,
                 "error": f"积分不足，需要 {required} 积分，当前余额 {balance} 积分"
+            }
+
+        all_points_for_id = (request.contextInfo or {}).get("allBulletPoints") or []
+        bullets_operation_id = billable_operation_id(
+            "ai-bullets",
+            user.id,
+            request.slideIndex,
+            request.userRequest,
+            "\n".join(str(point) for point in all_points_for_id),
+        )
+        proceed, reserve_message, reserve_state, bullets_owned = await acquire_billable_hold(
+            user.id,
+            bullets_operation_id,
+            "ai_edit",
+            1,
+            reference_id=str(request.projectInfo.get("project_id") or request.projectInfo.get("id") or ""),
+            provider_name=enhance_all_provider_name,
+        )
+        if not proceed:
+            return {
+                "success": reserve_state == "committed",
+                "already_completed": reserve_state == "committed",
+                "in_progress": reserve_state == "reserved",
+                "error": reserve_message,
             }
 
         # 构建上下文信息
@@ -1965,14 +2220,9 @@ async def ai_enhance_all_bullet_points(
         if not enhanced_points or len(enhanced_points) == 0:
             raise ValueError("AI生成的增强内容为空或被过滤")
 
-        await consume_credits_for_operation(
-            user.id,
-            "ai_edit",
-            1,
-            description=f"AI要点增强(全量): 第{request.slideIndex}页 {request.slideTitle}",
-            reference_id=str(request.projectInfo.get("project_id") or request.projectInfo.get("id") or ""),
-            provider_name=enhance_all_provider_name,
-        )
+        if bullets_owned:
+            await commit_billable_operation(bullets_owned, 1)
+            bullets_owned = None
 
         return {
             "success": True,
@@ -1981,7 +2231,13 @@ async def ai_enhance_all_bullet_points(
             "totalEnhanced": len(enhanced_points)
         }
 
+    except asyncio.CancelledError:
+        if locals().get("bullets_owned"):
+            await release_billable_operation(bullets_owned, "cancelled")
+        raise
     except Exception as e:
+        if locals().get("bullets_owned"):
+            await release_billable_operation(bullets_owned, "failure")
         logger.error(f"AI增强所有要点请求失败: {e}")
         return {
             "success": False,

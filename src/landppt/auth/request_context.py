@@ -78,6 +78,15 @@ def resolve_request_base_url(request) -> Optional[str]:
     if request is None:
         return None
 
+    try:
+        from ..core.config import app_config
+
+        configured = _normalize_base_url_candidate(app_config.public_base_url)
+        if configured:
+            return configured
+    except Exception:
+        pass
+
     candidates = []
 
     def add_candidate(raw_url: Optional[str], *, default_scheme: str = "https") -> None:
@@ -89,26 +98,20 @@ def resolve_request_base_url(request) -> Optional[str]:
         headers = request.headers
         request_scheme = (getattr(request.url, "scheme", None) or "https").strip().lower()
 
-        add_candidate(headers.get("origin"), default_scheme=request_scheme)
+        from .security import is_trusted_proxy
 
-        referer = headers.get("referer")
-        if referer:
-            try:
-                referer_parts = urlsplit(referer)
-                add_candidate(f"{referer_parts.scheme}://{referer_parts.netloc}", default_scheme=request_scheme)
-            except Exception:
-                pass
-
-        forwarded_host = (headers.get("x-forwarded-host") or "").strip()
-        forwarded_proto = (headers.get("x-forwarded-proto") or request_scheme).strip().lower()
-        forwarded_port = (headers.get("x-forwarded-port") or "").strip()
-        if "," in forwarded_host:
-            forwarded_host = forwarded_host.split(",", 1)[0].strip()
-        if "," in forwarded_proto:
-            forwarded_proto = forwarded_proto.split(",", 1)[0].strip()
-        if forwarded_host and forwarded_port and ":" not in forwarded_host:
-            forwarded_host = f"{forwarded_host}:{forwarded_port}"
-        add_candidate(forwarded_host, default_scheme=forwarded_proto or request_scheme)
+        client = getattr(request, "client", None)
+        if is_trusted_proxy(getattr(client, "host", None)):
+            forwarded_host = (headers.get("x-forwarded-host") or "").strip()
+            forwarded_proto = (headers.get("x-forwarded-proto") or request_scheme).strip().lower()
+            forwarded_port = (headers.get("x-forwarded-port") or "").strip()
+            if "," in forwarded_host:
+                forwarded_host = forwarded_host.split(",", 1)[0].strip()
+            if "," in forwarded_proto:
+                forwarded_proto = forwarded_proto.split(",", 1)[0].strip()
+            if forwarded_host and forwarded_port and ":" not in forwarded_host:
+                forwarded_host = f"{forwarded_host}:{forwarded_port}"
+            add_candidate(forwarded_host, default_scheme=forwarded_proto or request_scheme)
 
         host = (headers.get("host") or getattr(request.url, "netloc", "") or "").strip()
         add_candidate(host, default_scheme=request_scheme)

@@ -165,11 +165,16 @@ async def test_outline_route_closes_forwarded_stream_on_disconnect(monkeypatch, 
     async def allow_credits(*_args, **_kwargs):
         return True, 0, 100
 
+    async def skip_reserve(*_args, **_kwargs):
+        return True, "skipped", "skipped"
+
     async def no_charge(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(routes, "check_credits_for_operation", allow_credits)
-    monkeypatch.setattr(routes, "consume_credits_for_operation", no_charge)
+    monkeypatch.setattr(routes, "reserve_billable_operation", skip_reserve)
+    monkeypatch.setattr(routes, "commit_billable_operation", no_charge)
+    monkeypatch.setattr(routes, "release_billable_operation", no_charge)
 
     response = await routes.stream_outline_generation(
         "project-1", False, SimpleNamespace(id=1)

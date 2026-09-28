@@ -32,8 +32,10 @@ class _FakeCache:
         self.is_connected = True
         self.refreshed: list[tuple[str, int | None]] = []
         self.deleted: list[str] = []
+        self.reads: list[str] = []
 
     async def get_session(self, session_id: str):
+        self.reads.append(session_id)
         return dict(self.payload) if self.payload else None
 
     async def refresh_session(self, session_id: str, ttl: int | None = None):
@@ -65,14 +67,13 @@ def _create_user(db, username: str, email: str):
     return user
 
 
-def test_auth_middleware_uses_cached_session_without_opening_db(monkeypatch):
+def test_auth_middleware_does_not_trust_cache_after_database_revocation(monkeypatch):
     pytest.importorskip("fastapi")
-    from starlette.responses import Response
-
     import landppt.auth.middleware as auth_middleware_module
     import landppt.services.cache_service as cache_service_module
     from landppt.auth.auth_service import AuthService
     from landppt.auth.middleware import AuthMiddleware
+    from landppt.database.models import UserSession
 
     db = _create_db()
     try:
@@ -80,31 +81,37 @@ def test_auth_middleware_uses_cached_session_without_opening_db(monkeypatch):
         auth = AuthService()
         payload = auth.build_session_cache_payload(user, expires_at=time.time() + 300)
         fake_cache = _FakeCache(payload)
+        db.add(
+            UserSession(
+                user_id=user.id,
+                session_id="cached-session",
+                expires_at=time.time() + 300,
+                is_active=False,
+            )
+        )
+        db.commit()
 
         async def _fake_get_cache_service():
             return fake_cache
 
-        def _unexpected_get_db():
-            raise AssertionError("middleware should not open a DB session on cache hit")
-            yield None
+        def _get_db():
+            yield db
 
         monkeypatch.setattr(cache_service_module, "get_cache_service", _fake_get_cache_service)
-        monkeypatch.setattr(auth_middleware_module, "get_db", _unexpected_get_db)
+        monkeypatch.setattr(auth_middleware_module, "get_db", _get_db)
 
         middleware = AuthMiddleware()
         request = _FakeRequest(path="/dashboard", cookies={"session_id": "cached-session"})
 
         async def _call_next(req):
-            assert getattr(req.state, "user", None) is not None
-            return Response(status_code=204)
+            raise AssertionError("a revoked session must not reach the protected route")
 
         response = asyncio.run(middleware(request, _call_next))
 
-        assert response.status_code == 204
-        assert request.state.user.id == user.id
-        assert fake_cache.deleted == []
-        assert fake_cache.refreshed
-        assert fake_cache.refreshed[0][0] == "cached-session"
+        assert response.status_code == 302
+        assert response.headers["location"] == "/auth/login"
+        assert getattr(request.state, "user", None) is None
+        assert fake_cache.reads == []
     finally:
         db.close()
 

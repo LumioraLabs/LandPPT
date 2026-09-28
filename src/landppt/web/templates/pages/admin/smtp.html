@@ -225,12 +225,18 @@ user2@example.com" style="width:100%;resize:vertical;"></textarea>
                     document.getElementById('smtp_host').value = data.config.smtp_host || '';
                     document.getElementById('smtp_port').value = data.config.smtp_port || 465;
                     document.getElementById('smtp_user').value = data.config.smtp_user || '';
-                    document.getElementById('smtp_password').value = data.config.smtp_password || '';
+                    document.getElementById('smtp_password').value = '';
+                    document.getElementById('smtp_password').placeholder = data.config.smtp_password_set
+                        ? '已设置；留空表示保持不变'
+                        : '';
                     document.getElementById('smtp_use_ssl').checked = data.config.smtp_use_ssl !== false;
                     document.getElementById('smtp_from_email').value = data.config.smtp_from_email || '';
                     document.getElementById('smtp_from_name').value = data.config.smtp_from_name || 'LandPPT';
 
-                    document.getElementById('resend_api_key').value = data.config.resend_api_key || '';
+                    document.getElementById('resend_api_key').value = '';
+                    document.getElementById('resend_api_key').placeholder = data.config.resend_api_key_set
+                        ? '已设置；留空表示保持不变'
+                        : 're_...';
                     document.getElementById('resend_from_email').value = data.config.resend_from_email || '';
                     document.getElementById('resend_from_name').value = data.config.resend_from_name || 'LandPPT';
 

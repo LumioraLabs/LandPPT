@@ -6,6 +6,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 def _user(user_id: int, *, is_admin: bool = False):
     return SimpleNamespace(id=user_id, is_admin=is_admin)
 
@@ -162,7 +165,9 @@ def test_export_task_download_allows_admin_bypass(monkeypatch, tmp_path):
 
 
 def test_export_task_route_source_includes_owner_scoping_changes():
-    source = Path("/root/clawd/src/landppt/web/route_modules/export_routes.py").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "src/landppt/web/route_modules/export_routes.py").read_text(
+        encoding="utf-8"
+    )
 
     assert 'metadata_filter={"project_id": project_id, "user_id": user.id}' in source
     assert '"user_id": user.id' in source
@@ -172,7 +177,9 @@ def test_export_task_route_source_includes_owner_scoping_changes():
 
 
 def test_narration_task_route_source_includes_owner_scoping_changes():
-    source = Path("/root/clawd/src/landppt/web/route_modules/narration_routes.py").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "src/landppt/web/route_modules/narration_routes.py").read_text(
+        encoding="utf-8"
+    )
 
     assert 'metadata_filter={"project_id": project_id, "language": language, "provider": provider, "user_id": user.id}' in source
     assert '"user_id": user.id' in source

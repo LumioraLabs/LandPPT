@@ -3,16 +3,23 @@ Authentication routes for LandPPT
 """
 
 from fastapi import APIRouter, Request, Form, Depends, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 import logging
+import hashlib
 import time
 from typing import Optional
 from pydantic import BaseModel, Field, ValidationError
 
 from .auth_service import get_auth_service, AuthService
-from .middleware import get_current_user_optional, get_current_user_required, get_current_user
+from .cookies import clear_session_cookie, set_session_cookie
+from .security import get_client_ip
+from .middleware import (
+    get_current_user_optional,
+    get_current_user_required,
+    get_current_user,
+)
 from ..database.database import get_db
 from ..database.models import User
 from ..core.config import app_config
@@ -41,9 +48,19 @@ def _is_oauth_provider_visible(
     fallback_client_id,
     fallback_client_secret,
 ) -> bool:
-    enabled_value = system_config[enabled_key] if enabled_key in system_config else fallback_enabled
-    client_id_value = system_config[client_id_key] if client_id_key in system_config else fallback_client_id
-    client_secret_value = system_config[client_secret_key] if client_secret_key in system_config else fallback_client_secret
+    enabled_value = (
+        system_config[enabled_key] if enabled_key in system_config else fallback_enabled
+    )
+    client_id_value = (
+        system_config[client_id_key]
+        if client_id_key in system_config
+        else fallback_client_id
+    )
+    client_secret_value = (
+        system_config[client_secret_key]
+        if client_secret_key in system_config
+        else fallback_client_secret
+    )
     enabled = _as_bool(enabled_value)
     client_id = str(client_id_value or "").strip()
     client_secret = str(client_secret_value or "").strip()
@@ -60,8 +77,7 @@ async def _load_system_oauth_flags() -> dict:
             repo = UserConfigRepository(session)
             raw_system_config = await repo.get_all_configs(user_id=None)
         system_config = {
-            key: item.get("value")
-            for key, item in raw_system_config.items()
+            key: item.get("value") for key, item in raw_system_config.items()
         }
     except Exception as exc:
         logger.warning("Failed to load OAuth flags from system config: %s", exc)
@@ -90,17 +106,44 @@ async def _load_system_oauth_flags() -> dict:
 
 
 def _get_client_ip(request: Request) -> Optional[str]:
-    """
-    Best-effort client IP extraction (supports reverse proxies / Cloudflare).
-    """
-    headers = request.headers
-    ip = headers.get("cf-connecting-ip") or headers.get("x-real-ip")
-    if ip:
-        return ip.strip()
-    xff = headers.get("x-forwarded-for")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.client.host if request.client else None
+    """Backward-compatible wrapper around trusted-proxy-aware IP parsing."""
+    return get_client_ip(request)
+
+
+async def _record_failed_login(
+    request: Request, username: str
+) -> tuple[bool, Optional[int]]:
+    """Consume one login-attempt slot for both the account and source IP."""
+    from ..utils.rate_limiter import hit as rate_limit_hit
+
+    identity = hashlib.sha256(
+        str(username or "").strip().lower().encode("utf-8")
+    ).hexdigest()
+    buckets = [
+        (
+            f"rl:login:account:{identity}",
+            app_config.login_account_rate_limit_per_15_minutes,
+        )
+    ]
+    client_ip = _get_client_ip(request)
+    if client_ip:
+        buckets.append(
+            (
+                f"rl:login:ip:{client_ip}",
+                app_config.login_ip_rate_limit_per_15_minutes,
+            )
+        )
+
+    retry_after: Optional[int] = None
+    for key, limit in buckets:
+        allowed, _, reset_in = await rate_limit_hit(
+            key=key,
+            limit=max(1, int(limit)),
+            window_seconds=15 * 60,
+        )
+        if not allowed:
+            retry_after = max(retry_after or 0, reset_in or 15 * 60)
+    return retry_after is None, retry_after
 
 
 def _turnstile_template_ctx() -> dict:
@@ -124,7 +167,9 @@ async def _registration_template_ctx() -> dict:
 
     try:
         settings = await community_service.get_settings()
-        invite_required = bool(settings.get("invite_code_required_for_registration", False))
+        invite_required = bool(
+            settings.get("invite_code_required_for_registration", False)
+        )
     except Exception as exc:
         logger.warning("Failed to load registration template settings: %s", exc)
         invite_required = False
@@ -141,13 +186,16 @@ def _forgot_password_template_response(
     error: Optional[str] = None,
     success: Optional[str] = None,
 ):
-    return templates.TemplateResponse("pages/auth/forgot_password.html", {
-        "request": request,
-        "email": email,
-        "error": error,
-        "success": success,
-        **_turnstile_template_ctx(),
-    })
+    return templates.TemplateResponse(
+        "pages/auth/forgot_password.html",
+        {
+            "request": request,
+            "email": email,
+            "error": error,
+            "success": success,
+            **_turnstile_template_ctx(),
+        },
+    )
 
 
 @router.get("/auth/login", response_class=HTMLResponse)
@@ -175,18 +223,21 @@ async def login_page(
         active_tab = "login"
     registration_ctx = await _registration_template_ctx()
 
-    return templates.TemplateResponse("pages/auth/login.html", {
-        "request": request,
-        "error": error,
-        "register_error": register_error,
-        "success": success,
-        "username": username,
-        "register_invite_code": register_invite_code,
-        "active_tab": active_tab,
-        **_turnstile_template_ctx(),
-        **(await _oauth_template_ctx()),
-        **registration_ctx,
-    })
+    return templates.TemplateResponse(
+        "pages/auth/login.html",
+        {
+            "request": request,
+            "error": error,
+            "register_error": register_error,
+            "success": success,
+            "username": username,
+            "register_invite_code": register_invite_code,
+            "active_tab": active_tab,
+            **_turnstile_template_ctx(),
+            **(await _oauth_template_ctx()),
+            **registration_ctx,
+        },
+    )
 
 
 @router.post("/auth/login")
@@ -195,25 +246,48 @@ async def login(
     username: str = Form(...),
     password: str = Form(...),
     db: Session = Depends(get_db),
-    auth_service: AuthService = Depends(get_auth_service)
+    auth_service: AuthService = Depends(get_auth_service),
 ):
     """Handle login form submission"""
     registration_ctx = await _registration_template_ctx()
     try:
+        allowed, retry_after = await _record_failed_login(request, username)
+        if not allowed:
+            response = templates.TemplateResponse(
+                "pages/auth/login.html",
+                {
+                    "request": request,
+                    "error": "登录尝试次数过多，请稍后再试",
+                    "username": username,
+                    "active_tab": "login",
+                    **_turnstile_template_ctx(),
+                    **(await _oauth_template_ctx()),
+                    **registration_ctx,
+                },
+                status_code=429,
+            )
+            response.headers["Retry-After"] = str(retry_after or 900)
+            return response
+
         # Authenticate user
         user = auth_service.authenticate_user(db, username, password)
-        
+
         if not user:
-            return templates.TemplateResponse("pages/auth/login.html", {
-                "request": request,
-                "error": "用户名或密码错误",
-                "username": username,
-                "active_tab": "login",
-                **_turnstile_template_ctx(),
-                **(await _oauth_template_ctx()),
-                **registration_ctx,
-            })
-        
+            response = templates.TemplateResponse(
+                "pages/auth/login.html",
+                {
+                    "request": request,
+                    "error": "用户名或密码错误",
+                    "username": username,
+                    "active_tab": "login",
+                    **_turnstile_template_ctx(),
+                    **(await _oauth_template_ctx()),
+                    **registration_ctx,
+                },
+                status_code=401,
+            )
+            return response
+
         # Create session
         session_id = auth_service.create_session(db, user)
 
@@ -225,69 +299,71 @@ async def login(
                 db.commit()
         except Exception:
             pass
-        
+
         # Redirect to dashboard
         response = RedirectResponse(url="/dashboard", status_code=302)
 
         # Set cookie max_age based on session expiration
         # If session_expire_minutes is 0, set cookie to never expire (None means session cookie)
         current_expire_minutes = auth_service._get_current_expire_minutes()
-        cookie_max_age = None if current_expire_minutes == 0 else current_expire_minutes * 60
-
-        response.set_cookie(
-            key="session_id",
-            value=session_id,
-            max_age=cookie_max_age,
-            httponly=True,
-            secure=False,  # Set to True in production with HTTPS
-            samesite="lax"
+        cookie_max_age = (
+            None if current_expire_minutes == 0 else current_expire_minutes * 60
         )
-        
+
+        set_session_cookie(response, session_id, max_age=cookie_max_age)
+
         logger.info(f"User {username} logged in successfully")
         return response
-        
+
     except Exception as e:
         logger.error(f"Login error: {e}")
-        return templates.TemplateResponse("pages/auth/login.html", {
-            "request": request,
-            "error": "登录过程中发生错误，请重试",
-            "username": username,
-            "active_tab": "login",
-            **_turnstile_template_ctx(),
-            **(await _oauth_template_ctx()),
-            **registration_ctx,
-        })
+        return templates.TemplateResponse(
+            "pages/auth/login.html",
+            {
+                "request": request,
+                "error": "登录过程中发生错误，请重试",
+                "username": username,
+                "active_tab": "login",
+                **_turnstile_template_ctx(),
+                **(await _oauth_template_ctx()),
+                **registration_ctx,
+            },
+        )
 
 
 @router.get("/auth/logout")
 async def logout(
     request: Request,
     db: Session = Depends(get_db),
-    auth_service: AuthService = Depends(get_auth_service)
+    auth_service: AuthService = Depends(get_auth_service),
 ):
     """Logout user"""
     session_id = request.cookies.get("session_id")
-    
+
     if session_id:
         auth_service.logout_user(db, session_id)
-    
-    response = RedirectResponse(url="/auth/login?success=已成功退出登录", status_code=302)
-    response.delete_cookie("session_id")
-    
+
+    response = RedirectResponse(
+        url="/auth/login?success=已成功退出登录", status_code=302
+    )
+    clear_session_cookie(response)
+
     return response
 
 
 @router.get("/auth/profile", response_class=HTMLResponse)
 async def profile_page(
-    request: Request,
-    user: User = Depends(get_current_user_required)
+    request: Request, user: User = Depends(get_current_user_required)
 ):
     """User profile page"""
-    return templates.TemplateResponse("pages/account/profile.html", {
-        "request": request,
-        "user": user.to_dict(),
-        "credits_enabled": app_config.enable_credits_system
-    })
+    return templates.TemplateResponse(
+        "pages/account/profile.html",
+        {
+            "request": request,
+            "user": user.to_dict(),
+            "credits_enabled": app_config.enable_credits_system,
+        },
+    )
 
 
 @router.post("/auth/change-password")
@@ -298,60 +374,77 @@ async def change_password(
     confirm_password: str = Form(...),
     user: User = Depends(get_current_user_required),
     db: Session = Depends(get_db),
-    auth_service: AuthService = Depends(get_auth_service)
+    auth_service: AuthService = Depends(get_auth_service),
 ):
     """Change user password"""
     try:
         # Validate current password
-        if not user.check_password(current_password):
-            return templates.TemplateResponse("pages/account/profile.html", {
-                "request": request,
-                "user": user.to_dict(),
-                "credits_enabled": app_config.enable_credits_system,
-                "error": "当前密码错误"
-            })
-        
+        credential_user = db.query(User).filter(User.id == user.id).first()
+        if not credential_user or not credential_user.check_password(current_password):
+            return templates.TemplateResponse(
+                "pages/account/profile.html",
+                {
+                    "request": request,
+                    "user": user.to_dict(),
+                    "credits_enabled": app_config.enable_credits_system,
+                    "error": "当前密码错误",
+                },
+            )
+
         # Validate new password
         if new_password != confirm_password:
-            return templates.TemplateResponse("pages/account/profile.html", {
-                "request": request,
-                "user": user.to_dict(),
-                "credits_enabled": app_config.enable_credits_system,
-                "error": "新密码和确认密码不匹配"
-            })
-        
-        if len(new_password) < 6:
-            return templates.TemplateResponse("pages/account/profile.html", {
-                "request": request,
-                "user": user.to_dict(),
-                "credits_enabled": app_config.enable_credits_system,
-                "error": "密码长度至少6位"
-            })
-        
+            return templates.TemplateResponse(
+                "pages/account/profile.html",
+                {
+                    "request": request,
+                    "user": user.to_dict(),
+                    "credits_enabled": app_config.enable_credits_system,
+                    "error": "新密码和确认密码不匹配",
+                },
+            )
+
+        if len(new_password) < app_config.password_min_length:
+            return templates.TemplateResponse(
+                "pages/account/profile.html",
+                {
+                    "request": request,
+                    "user": user.to_dict(),
+                    "credits_enabled": app_config.enable_credits_system,
+                    "error": f"密码长度至少{app_config.password_min_length}位",
+                },
+            )
+
         # Update password
         if auth_service.update_user_password(db, user, new_password):
-            return templates.TemplateResponse("pages/account/profile.html", {
-                "request": request,
-                "user": user.to_dict(),
-                "credits_enabled": app_config.enable_credits_system,
-                "success": "密码修改成功"
-            })
+            await auth_service.invalidate_user_sessions_cache(user.id)
+            response = RedirectResponse(
+                url="/auth/login?success=密码修改成功，请重新登录",
+                status_code=302,
+            )
+            clear_session_cookie(response)
+            return response
         else:
-            return templates.TemplateResponse("pages/account/profile.html", {
-                "request": request,
-                "user": user.to_dict(),
-                "credits_enabled": app_config.enable_credits_system,
-                "error": "密码修改失败，请重试"
-            })
-            
+            return templates.TemplateResponse(
+                "pages/account/profile.html",
+                {
+                    "request": request,
+                    "user": user.to_dict(),
+                    "credits_enabled": app_config.enable_credits_system,
+                    "error": "密码修改失败，请重试",
+                },
+            )
+
     except Exception as e:
         logger.error(f"Change password error: {e}")
-        return templates.TemplateResponse("pages/account/profile.html", {
-            "request": request,
-            "user": user.to_dict(),
-            "credits_enabled": app_config.enable_credits_system,
-            "error": "修改密码过程中发生错误"
-        })
+        return templates.TemplateResponse(
+            "pages/account/profile.html",
+            {
+                "request": request,
+                "user": user.to_dict(),
+                "credits_enabled": app_config.enable_credits_system,
+                "error": "修改密码过程中发生错误",
+            },
+        )
 
 
 # API endpoints for authentication
@@ -361,14 +454,22 @@ async def api_login(
     username: str = Form(...),
     password: str = Form(...),
     db: Session = Depends(get_db),
-    auth_service: AuthService = Depends(get_auth_service)
+    auth_service: AuthService = Depends(get_auth_service),
 ):
     """API login endpoint"""
+    allowed, retry_after = await _record_failed_login(request, username)
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="登录尝试次数过多，请稍后再试",
+            headers={"Retry-After": str(retry_after or 900)},
+        )
+
     user = auth_service.authenticate_user(db, username, password)
-    
+
     if not user:
         raise HTTPException(status_code=401, detail="用户名或密码错误")
-    
+
     session_id = auth_service.create_session(db, user)
 
     # Best-effort update last login IP (requires DB columns)
@@ -379,52 +480,51 @@ async def api_login(
             db.commit()
     except Exception:
         pass
-    
-    return {
-        "success": True,
-        "session_id": session_id,
-        "user": user.to_dict()
-    }
+
+    response = JSONResponse(
+        {
+            "success": True,
+            "session_id": session_id,
+            "user": user.to_dict(),
+        }
+    )
+    current_expire_minutes = auth_service._get_current_expire_minutes()
+    cookie_max_age = (
+        None if current_expire_minutes == 0 else current_expire_minutes * 60
+    )
+    set_session_cookie(response, session_id, max_age=cookie_max_age)
+    return response
 
 
 @router.post("/api/auth/logout")
 async def api_logout(
     request: Request,
     db: Session = Depends(get_db),
-    auth_service: AuthService = Depends(get_auth_service)
+    auth_service: AuthService = Depends(get_auth_service),
 ):
     """API logout endpoint"""
     session_id = request.cookies.get("session_id")
-    
+
     if session_id:
         auth_service.logout_user(db, session_id)
-    
-    return {"success": True, "message": "已成功退出登录"}
+
+    response = JSONResponse({"success": True, "message": "已成功退出登录"})
+    clear_session_cookie(response)
+    return response
 
 
 @router.get("/api/auth/me")
-async def api_current_user(
-    user: User = Depends(get_current_user_required)
-):
+async def api_current_user(user: User = Depends(get_current_user_required)):
     """Get current user info"""
-    return {
-        "success": True,
-        "user": user.to_dict()
-    }
+    return {"success": True, "user": user.to_dict()}
 
 
 @router.get("/api/auth/check")
-async def api_check_auth(
-    request: Request,
-    db: Session = Depends(get_db)
-):
+async def api_check_auth(request: Request, db: Session = Depends(get_db)):
     """Check authentication status"""
     user = get_current_user_optional(request, db)
-    
-    return {
-        "authenticated": user is not None,
-        "user": user.to_dict() if user else None
-    }
+
+    return {"authenticated": user is not None, "user": user.to_dict() if user else None}
 
 
 class UserAPIKeyCreateRequest(BaseModel):
@@ -451,7 +551,7 @@ async def api_list_user_api_keys(
     include_inactive: bool = True,
     user: User = Depends(get_current_user_required),
     db: Session = Depends(get_db),
-    auth_service: AuthService = Depends(get_auth_service)
+    auth_service: AuthService = Depends(get_auth_service),
 ):
     """List API keys for current user."""
     records = auth_service.list_user_api_keys(
@@ -461,7 +561,7 @@ async def api_list_user_api_keys(
     )
     return {
         "success": True,
-        "api_keys": [_serialize_user_api_key(record) for record in records]
+        "api_keys": [_serialize_user_api_key(record) for record in records],
     }
 
 
@@ -470,7 +570,7 @@ async def api_create_or_rotate_user_api_key(
     request: Request,
     user: User = Depends(get_current_user_required),
     db: Session = Depends(get_db),
-    auth_service: AuthService = Depends(get_auth_service)
+    auth_service: AuthService = Depends(get_auth_service),
 ):
     """Create or rotate one named API key for current user."""
     try:
@@ -517,7 +617,7 @@ async def api_delete_user_api_key(
     key_id: int,
     user: User = Depends(get_current_user_required),
     db: Session = Depends(get_db),
-    auth_service: AuthService = Depends(get_auth_service)
+    auth_service: AuthService = Depends(get_auth_service),
 ):
     """Delete one API key by id for current user."""
     success = auth_service.delete_user_api_key(db=db, user_id=user.id, key_id=key_id)
@@ -553,16 +653,19 @@ async def register_page(
         return RedirectResponse(url="/dashboard", status_code=302)
     registration_ctx = await _registration_template_ctx()
 
-    return templates.TemplateResponse("pages/auth/register.html", {
-        "request": request,
-        "error": error,
-        "success": success,
-        "invite_code": invite_code,
-        "registration_enabled": app_config.enable_user_registration,
-        **(await _oauth_template_ctx()),
-        **registration_ctx,
-        **_turnstile_template_ctx(),
-    })
+    return templates.TemplateResponse(
+        "pages/auth/register.html",
+        {
+            "request": request,
+            "error": error,
+            "success": success,
+            "invite_code": invite_code,
+            "registration_enabled": app_config.enable_user_registration,
+            **(await _oauth_template_ctx()),
+            **registration_ctx,
+            **_turnstile_template_ctx(),
+        },
+    )
 
 
 @router.post("/auth/register")
@@ -577,13 +680,14 @@ async def register(
     turnstile_token: Optional[str] = Form(default=None),
     ui: Optional[str] = Form(default=None),
     db: Session = Depends(get_db),
-    auth_service: AuthService = Depends(get_auth_service)
+    auth_service: AuthService = Depends(get_auth_service),
 ):
     """Handle registration form submission"""
     from ..services.email_service import verify_code
     from ..services.community_service import community_service
+
     registration_ctx = await _registration_template_ctx()
-    
+
     ctx = {
         "request": request,
         "email": email,
@@ -599,25 +703,29 @@ async def register(
         # If registration was initiated from the combined login/register page,
         # keep the user on that page and show the error inline.
         if (ui or "").lower() in {"login", "combined"}:
-            return templates.TemplateResponse("pages/auth/login.html", {
-                "request": request,
-                "active_tab": "register",
-                "register_error": message,
-                "register_email": email,
-                "register_invite_code": invite_code or "",
-                "register_username": username,
-                **_turnstile_template_ctx(),
-                **(await _oauth_template_ctx()),
-                **registration_ctx,
-            })
+            return templates.TemplateResponse(
+                "pages/auth/login.html",
+                {
+                    "request": request,
+                    "active_tab": "register",
+                    "register_error": message,
+                    "register_email": email,
+                    "register_invite_code": invite_code or "",
+                    "register_username": username,
+                    **_turnstile_template_ctx(),
+                    **(await _oauth_template_ctx()),
+                    **registration_ctx,
+                },
+            )
         ctx["error"] = message
         return templates.TemplateResponse("pages/auth/register.html", ctx)
-    
+
     if not app_config.enable_user_registration:
         return await render_register_error("用户注册已关闭")
 
     # Basic IP rate limiting for registration attempts
     from ..utils.rate_limiter import hit as rate_limit_hit
+
     ip = _get_client_ip(request)
     if ip:
         allowed, _, reset_in = await rate_limit_hit(
@@ -630,36 +738,42 @@ async def register(
             return await render_register_error(
                 f"请求过于频繁：同一 IP 每小时最多 {app_config.registration_ip_rate_limit_per_hour} 次{hint}"
             )
-    
+
     if password != confirm_password:
         return await render_register_error("两次密码输入不一致")
-    
-    if len(password) < 6:
-        return await render_register_error("密码长度至少6位")
-    
+
+    if len(password) < app_config.password_min_length:
+        return await render_register_error(
+            f"密码长度至少{app_config.password_min_length}位"
+        )
+
     if len(username) < 3:
         return await render_register_error("用户名至少3个字符")
 
     try:
-        validated_invite = community_service.resolve_registration_invite(db, invite_code, "mail")
+        validated_invite = community_service.resolve_registration_invite(
+            db, invite_code, "mail"
+        )
     except ValueError as exc:
         return await render_register_error(str(exc))
 
     # Verify email code
-    success, message = await verify_code(email, code, 'register')
+    success, message = await verify_code(email, code, "register")
     if not success:
         return await render_register_error(message)
-    
+
     # Check if username or email already exists
-    existing_user = db.query(User).filter(
-        (User.username == username) | (User.email == email)
-    ).first()
+    existing_user = (
+        db.query(User)
+        .filter((User.username == username) | (User.email == email))
+        .first()
+    )
     if existing_user:
         if existing_user.username == username:
             return await render_register_error("用户名已被使用")
         else:
             return await render_register_error("邮箱已被注册")
-    
+
     try:
         # Create user
         user = auth_service.create_user(db, username, password, email, commit=False)
@@ -669,13 +783,14 @@ async def register(
                 user.register_ip = ip
             user.registration_channel = "mail"
             if validated_invite is not None:
-                community_service.apply_invite_code_to_user(db, user, validated_invite, "mail")
+                community_service.apply_invite_code_to_user(
+                    db, user, validated_invite, "mail"
+                )
             db.commit()
             db.refresh(user)
             logger.info(f"New user registered: {username} ({email})")
             return RedirectResponse(
-                url="/auth/login?success=注册成功，请登录",
-                status_code=302
+                url="/auth/login?success=注册成功，请登录", status_code=302
             )
         else:
             return await render_register_error("注册失败，请重试")
@@ -686,9 +801,7 @@ async def register(
 
 @router.get("/auth/forgot-password", response_class=HTMLResponse)
 async def forgot_password_page(
-    request: Request,
-    error: str = None,
-    success: str = None
+    request: Request, error: str = None, success: str = None
 ):
     """Forgot password page"""
     return _forgot_password_template_response(
@@ -705,7 +818,7 @@ async def reset_password(
     code: str = Form(...),
     new_password: str = Form(...),
     confirm_password: str = Form(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """Handle password reset form submission"""
     from ..services.email_service import verify_code
@@ -717,15 +830,15 @@ async def reset_password(
             error="两次密码输入不一致",
         )
 
-    if len(new_password) < 6:
+    if len(new_password) < app_config.password_min_length:
         return _forgot_password_template_response(
             request,
             email=email,
-            error="密码长度至少6位",
+            error=f"密码长度至少{app_config.password_min_length}位",
         )
 
     # Verify email code
-    success, message = await verify_code(email, code, 'reset')
+    success, message = await verify_code(email, code, "reset")
     if not success:
         return _forgot_password_template_response(
             request,
@@ -744,13 +857,13 @@ async def reset_password(
 
     try:
         # Update password
-        user.set_password(new_password)
-        db.commit()
-        await get_auth_service().invalidate_user_sessions_cache(user.id)
+        auth_service = get_auth_service()
+        if not auth_service.update_user_password(db, user, new_password):
+            raise RuntimeError("Password update failed")
+        await auth_service.invalidate_user_sessions_cache(user.id)
         logger.info(f"Password reset for user: {user.username}")
         return RedirectResponse(
-            url="/auth/login?success=密码重置成功，请登录",
-            status_code=302
+            url="/auth/login?success=密码重置成功，请登录", status_code=302
         )
     except Exception as e:
         logger.error(f"Password reset error: {e}")
@@ -762,21 +875,24 @@ async def reset_password(
 
 
 @router.post("/auth/api/send-code")
-async def api_send_code(request: Request, request_data: SendCodeRequest, db: Session = Depends(get_db)):
+async def api_send_code(
+    request: Request, request_data: SendCodeRequest, db: Session = Depends(get_db)
+):
     """API endpoint to send verification code"""
     from ..services.email_service import send_verification_email
     from ..services.turnstile_service import is_turnstile_active, verify_turnstile
-    
+
     email = request_data.email.strip().lower()
     code_type = request_data.code_type
-    
-    if code_type not in ['register', 'reset']:
+
+    if code_type not in ["register", "reset"]:
         return {"success": False, "message": "无效的验证码类型"}
-    
+
     # For registration, check if email already exists
-    if code_type == 'register':
+    if code_type == "register":
         from ..services.community_service import community_service
         from ..utils.rate_limiter import hit as rate_limit_hit
+
         ip = _get_client_ip(request)
         if ip:
             allowed, _, reset_in = await rate_limit_hit(
@@ -792,29 +908,35 @@ async def api_send_code(request: Request, request_data: SendCodeRequest, db: Ses
                 }
 
         if is_turnstile_active():
-            ok, msg = await verify_turnstile(request_data.turnstile_token, _get_client_ip(request))
+            ok, msg = await verify_turnstile(
+                request_data.turnstile_token, _get_client_ip(request)
+            )
             if not ok:
                 return {"success": False, "message": msg}
         if not app_config.enable_user_registration:
             return {"success": False, "message": "用户注册已关闭"}
         try:
-            community_service.resolve_registration_invite(db, request_data.invite_code, "mail")
+            community_service.resolve_registration_invite(
+                db, request_data.invite_code, "mail"
+            )
         except ValueError as exc:
             return {"success": False, "message": str(exc)}
         existing = db.query(User).filter(User.email == email).first()
         if existing:
             return {"success": False, "message": "该邮箱已被注册"}
-    
+
     # For password reset, check if email exists
-    if code_type == 'reset':
+    if code_type == "reset":
         if is_turnstile_active():
-            ok, msg = await verify_turnstile(request_data.turnstile_token, _get_client_ip(request))
+            ok, msg = await verify_turnstile(
+                request_data.turnstile_token, _get_client_ip(request)
+            )
             if not ok:
                 return {"success": False, "message": msg}
         existing = db.query(User).filter(User.email == email).first()
         if not existing:
             return {"success": False, "message": "该邮箱未注册"}
-    
+
     # Send verification email
     success, message = await send_verification_email(email, code_type)
     return {"success": success, "message": message}

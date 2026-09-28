@@ -1,6 +1,10 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _user(user_id: int, *, is_admin: bool = False):
@@ -118,20 +122,26 @@ async def test_database_service_cleanup_excess_slides_falls_back_to_request_cont
 
 
 def test_slide_cleanup_source_threads_explicit_user_id():
-    source = open("/root/clawd/src/landppt/web/route_modules/slide_routes.py", "r", encoding="utf-8").read()
+    source = (REPO_ROOT / "src/landppt/web/route_modules/slide_routes.py").read_text(
+        encoding="utf-8"
+    )
     assert "deleted_count = await db_manager.cleanup_excess_slides(" in source
     assert "user_id=user.id" in source
 
 
 def test_db_project_manager_source_accepts_cleanup_user_id():
-    source = open("/root/clawd/src/landppt/services/db_project_manager.py", "r", encoding="utf-8").read()
+    source = (REPO_ROOT / "src/landppt/services/db_project_manager.py").read_text(
+        encoding="utf-8"
+    )
     assert "async def cleanup_excess_slides(" in source
     assert "user_id: Optional[int] = None" in source
     assert "user_id=user_id" in source
 
 
 def test_database_service_source_prefers_explicit_cleanup_user_id_with_fallback():
-    source = open("/root/clawd/src/landppt/database/service.py", "r", encoding="utf-8").read()
+    source = (REPO_ROOT / "src/landppt/database/service.py").read_text(
+        encoding="utf-8"
+    )
     assert "async def cleanup_excess_slides(" in source
     assert "effective_user_id = user_id" in source
     assert "if effective_user_id == USER_SCOPE_ALL:" in source

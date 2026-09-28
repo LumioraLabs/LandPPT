@@ -64,7 +64,8 @@
                         data-slide-index="{{ loop.index0 }}" draggable="true">
                         <div class="drag-indicator top"></div>
                         <div class="slide-preview">
-                            <iframe srcdoc="{{ slide.html_content | e }}" title="Slide {{ loop.index }}"></iframe>
+                            <iframe sandbox="allow-same-origin" referrerpolicy="no-referrer"
+                                srcdoc="{{ slide.html_content | e }}" title="Slide {{ loop.index }}"></iframe>
                         </div>
                         <div class="slide-title">{{ loop.index }}. {{ slide.title }}{% if slide.render_mode == 'svg' %}<span class="slide-mode-badge" title="SVG 实验页">SVG</span>{% endif %}</div>
                         <div class="drag-indicator bottom"></div>
@@ -276,7 +277,8 @@
                                     <i class="fas fa-chevron-left"></i>
                                 </button>
 
-                                <iframe class="slide-frame" id="slideFrame"
+                                <iframe class="slide-frame" id="slideFrame" sandbox="allow-same-origin"
+                                    referrerpolicy="no-referrer"
                                     srcdoc="{{ project.slides_data[0].html_content | e }}"
                                     title="Slide Preview"></iframe>
 
@@ -429,8 +431,10 @@
         <div class="slideshow-container">
             <div class="slideshow-slide">
                 <div class="iframe-container">
-                    <iframe id="slideshowFrame1" class="visible" title="Slideshow Frame 1"></iframe>
-                    <iframe id="slideshowFrame2" class="hidden" title="Slideshow Frame 2"></iframe>
+                    <iframe id="slideshowFrame1" class="visible" title="Slideshow Frame 1"
+                        sandbox="allow-same-origin" referrerpolicy="no-referrer"></iframe>
+                    <iframe id="slideshowFrame2" class="hidden" title="Slideshow Frame 2"
+                        sandbox="allow-same-origin" referrerpolicy="no-referrer"></iframe>
                 </div>
             </div>
 

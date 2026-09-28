@@ -204,6 +204,31 @@
         font-size: 0.9rem;
     }
 
+    .purchase-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+        gap: 12px;
+    }
+
+    .purchase-card {
+        display: grid;
+        gap: 10px;
+        padding: 16px;
+        border: 1px solid var(--border-color);
+        border-radius: var(--border-radius-lg);
+        background: var(--surface-subtle);
+    }
+
+    .purchase-card strong {
+        font-size: 1.05rem;
+    }
+
+    .purchase-price {
+        color: var(--ink-strong);
+        font-size: 1.25rem;
+        font-weight: 900;
+    }
+
     .checkin-panel {
         display: flex;
         justify-content: space-between;
@@ -394,6 +419,16 @@
         </div>
     </div>
 
+    <div class="credits-section" id="purchaseSection" hidden>
+        <div class="credits-section-header">
+            <h3><i class="fas fa-credit-card"></i> 购买积分</h3>
+            <span class="muted">由 Stripe 安全处理付款</span>
+        </div>
+        <div class="credits-section-body">
+            <div class="purchase-grid" id="purchaseGrid"></div>
+        </div>
+    </div>
+
     <div class="credits-grid">
         <div class="credits-section">
             <div class="credits-section-header">
@@ -458,9 +493,12 @@
 
     function showAlert(message, type = 'success') {
         const area = document.getElementById('alertArea');
-        area.innerHTML = `<div class="alert alert-${type}">${message}</div>`;
+        const alert = document.createElement('div');
+        alert.className = `alert alert-${type === 'error' ? 'error' : 'success'}`;
+        alert.textContent = String(message || '');
+        area.replaceChildren(alert);
         clearTimeout(alertTimer);
-        alertTimer = setTimeout(() => area.innerHTML = '', 5000);
+        alertTimer = setTimeout(() => area.replaceChildren(), 5000);
     }
 
     async function loadStats() {
@@ -484,15 +522,128 @@
             const res = await fetch('/credits/api/pricing');
             const data = await res.json();
             const grid = document.getElementById('pricingGrid');
-            grid.innerHTML = Object.entries(data.pricing).map(([key, item]) => `
-                <div class="pricing-item">
-                    <div class="pricing-cost">${item.cost} 积分</div>
-                    <div class="pricing-desc">${item.description}</div>
-                </div>
-            `).join('');
+            grid.replaceChildren();
+            for (const item of Object.values(data.pricing || {})) {
+                const card = document.createElement('div');
+                card.className = 'pricing-item';
+                const cost = document.createElement('div');
+                cost.className = 'pricing-cost';
+                cost.textContent = `${item.cost} 积分`;
+                const description = document.createElement('div');
+                description.className = 'pricing-desc';
+                description.textContent = String(item.description || '');
+                card.append(cost, description);
+                grid.append(card);
+            }
         } catch (e) {
             showAlert('加载计费参考失败', 'error');
         }
+    }
+
+    function formatMoney(amountMinor, currency) {
+        return new Intl.NumberFormat(undefined, {
+            style: 'currency',
+            currency: String(currency || 'usd').toUpperCase()
+        }).format(Number(amountMinor) / 100);
+    }
+
+    async function loadPurchasePacks() {
+        try {
+            const res = await fetch('/billing/api/packages');
+            const data = await res.json();
+            if (!res.ok || !data.enabled || !data.packages.length) return;
+            const grid = document.getElementById('purchaseGrid');
+            grid.replaceChildren();
+            for (const pack of data.packages) {
+                const card = document.createElement('div');
+                card.className = 'purchase-card';
+                const name = document.createElement('strong');
+                name.textContent = pack.name;
+                const credits = document.createElement('div');
+                credits.className = 'muted';
+                credits.textContent = `${pack.credits} 积分`;
+                const price = document.createElement('div');
+                price.className = 'purchase-price';
+                price.textContent = formatMoney(pack.amount_minor, pack.currency);
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'btn btn-primary';
+                button.innerHTML = '<i class="fas fa-lock"></i> 安全结账';
+                button.addEventListener('click', () => startCheckout(pack.id, button));
+                card.append(name, credits, price, button);
+                grid.append(card);
+            }
+            document.getElementById('purchaseSection').hidden = false;
+        } catch (e) {
+            console.warn('Unable to load billing packages', e);
+        }
+    }
+
+    async function startCheckout(packId, button) {
+        const previous = button.innerHTML;
+        button.disabled = true;
+        button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 正在打开结账...';
+        const requestKeyStorageKey = `landpptCheckoutRequest:${packId}`;
+        try {
+            // Keep the same key until the server responds. If the request reached
+            // Stripe but the response was lost, a retry must resume that order.
+            let idempotencyKey = sessionStorage.getItem(requestKeyStorageKey);
+            if (!idempotencyKey) {
+                idempotencyKey = crypto.randomUUID();
+                sessionStorage.setItem(requestKeyStorageKey, idempotencyKey);
+            }
+            const res = await fetch('/billing/api/checkout', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Idempotency-Key': idempotencyKey
+                },
+                body: JSON.stringify({ pack_id: packId })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || '暂时无法发起付款');
+            sessionStorage.removeItem(requestKeyStorageKey);
+            sessionStorage.setItem('landpptPendingPaymentOrder', data.order_id);
+            window.location.assign(data.checkout_url);
+        } catch (e) {
+            showAlert(e.message || '暂时无法发起付款', 'error');
+            button.disabled = false;
+            button.innerHTML = previous;
+        }
+    }
+
+    async function handleCheckoutReturn() {
+        const params = new URLSearchParams(window.location.search);
+        const state = params.get('checkout');
+        if (state === 'cancelled') {
+            showAlert('付款已取消，未扣款。', 'error');
+            return;
+        }
+        if (state !== 'success') return;
+        const orderId = sessionStorage.getItem('landpptPendingPaymentOrder');
+        if (!orderId) {
+            showAlert('付款已提交，积分将在确认后自动到账。', 'success');
+            return;
+        }
+        for (let attempt = 0; attempt < 8; attempt += 1) {
+            const res = await fetch(`/billing/api/orders/${encodeURIComponent(orderId)}`);
+            if (res.ok) {
+                const order = await res.json();
+                if (order.status === 'fulfilled') {
+                    sessionStorage.removeItem('landpptPendingPaymentOrder');
+                    showAlert('付款成功，积分已到账。', 'success');
+                    loadStats();
+                    loadTransactions(1);
+                    return;
+                }
+                if (['payment_failed', 'expired', 'refunded'].includes(order.status)) {
+                    showAlert(`付款状态：${order.status}`, 'error');
+                    return;
+                }
+            }
+            await new Promise(resolve => setTimeout(resolve, 1500));
+        }
+        showAlert('付款已提交，积分将在确认后自动到账。', 'success');
     }
 
     async function loadTransactions(page = 1) {
@@ -522,35 +673,47 @@
             'daily_checkin': '每日签到',
             'invite_reward': '邀请码赠送'
         };
-        tbody.innerHTML = transactions.map(t => `
-            <tr>
-                <td>${new Date(t.created_at * 1000).toLocaleString()}</td>
-                <td>${typeLabels[t.transaction_type] || t.transaction_type}</td>
-                <td>${t.description}</td>
-                <td class="${t.amount >= 0 ? 'amount-positive' : 'amount-negative'}">
-                    ${t.amount >= 0 ? '+' : ''}${t.amount}
-                </td>
-                <td>${t.balance_after}</td>
-            </tr>
-        `).join('');
+        const rows = transactions.map(t => {
+            const row = document.createElement('tr');
+            const values = [
+                new Date(Number(t.created_at) * 1000).toLocaleString(),
+                typeLabels[t.transaction_type] || t.transaction_type,
+                t.description,
+                `${Number(t.amount) >= 0 ? '+' : ''}${t.amount}`,
+                t.balance_after
+            ];
+            values.forEach((value, index) => {
+                const cell = document.createElement('td');
+                cell.textContent = String(value ?? '');
+                if (index === 3) {
+                    cell.className = Number(t.amount) >= 0 ? 'amount-positive' : 'amount-negative';
+                }
+                row.append(cell);
+            });
+            return row;
+        });
+        tbody.replaceChildren(...rows);
     }
 
     function renderPagination(totalPages) {
         const div = document.getElementById('pagination');
-        if (totalPages <= 1) { div.innerHTML = ''; return; }
-        const parts = [];
+        div.replaceChildren();
+        totalPages = Math.max(0, Number.parseInt(totalPages, 10) || 0);
+        if (totalPages <= 1) return;
 
         const addButton = (label, page, { active = false, disabled = false } = {}) => {
-            const safeLabel = String(label);
-            if (disabled) {
-                parts.push(`<button disabled>${safeLabel}</button>`);
-                return;
+            const button = document.createElement('button');
+            button.textContent = String(label);
+            button.disabled = disabled;
+            if (active) button.className = 'active';
+            if (!disabled) {
+                button.addEventListener('click', () => loadTransactions(page));
             }
-            parts.push(`<button class="${active ? 'active' : ''}" onclick="loadTransactions(${page})">${safeLabel}</button>`);
+            div.append(button);
         };
 
         const addEllipsis = () => {
-            parts.push('<button disabled>...</button>');
+            addButton('...', 0, { disabled: true });
         };
 
         // Prev
@@ -576,7 +739,6 @@
         // Next
         addButton('下一页', currentPage + 1, { disabled: currentPage >= totalPages });
 
-        div.innerHTML = parts.join('');
     }
 
     async function loadCheckinStatus() {
@@ -674,6 +836,8 @@
     loadStats();
     loadCheckinStatus();
     loadPricing();
+    loadPurchasePacks();
     loadTransactions();
+    handleCheckoutReturn();
 </script>
 {% endblock %}

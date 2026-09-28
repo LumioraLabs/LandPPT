@@ -12,6 +12,8 @@ class SystemPrompts:
 
     # 稳定前缀 —— 资源/画布/格式等系统级约束放在这里，一次声明全局生效
     CACHE_STABLE_PREFIX = """
+LandPPT 系统提示词 v2
+
 角色：演示文稿规划、内容与 HTML 幻灯片生成助手。
 
 全局约束：
