@@ -493,9 +493,12 @@
 
     function showAlert(message, type = 'success') {
         const area = document.getElementById('alertArea');
-        area.innerHTML = `<div class="alert alert-${type}">${message}</div>`;
+        const alert = document.createElement('div');
+        alert.className = `alert alert-${type === 'error' ? 'error' : 'success'}`;
+        alert.textContent = String(message || '');
+        area.replaceChildren(alert);
         clearTimeout(alertTimer);
-        alertTimer = setTimeout(() => area.innerHTML = '', 5000);
+        alertTimer = setTimeout(() => area.replaceChildren(), 5000);
     }
 
     async function loadStats() {
@@ -519,12 +522,19 @@
             const res = await fetch('/credits/api/pricing');
             const data = await res.json();
             const grid = document.getElementById('pricingGrid');
-            grid.innerHTML = Object.entries(data.pricing).map(([key, item]) => `
-                <div class="pricing-item">
-                    <div class="pricing-cost">${item.cost} 积分</div>
-                    <div class="pricing-desc">${item.description}</div>
-                </div>
-            `).join('');
+            grid.replaceChildren();
+            for (const item of Object.values(data.pricing || {})) {
+                const card = document.createElement('div');
+                card.className = 'pricing-item';
+                const cost = document.createElement('div');
+                cost.className = 'pricing-cost';
+                cost.textContent = `${item.cost} 积分`;
+                const description = document.createElement('div');
+                description.className = 'pricing-desc';
+                description.textContent = String(item.description || '');
+                card.append(cost, description);
+                grid.append(card);
+            }
         } catch (e) {
             showAlert('加载计费参考失败', 'error');
         }
@@ -573,8 +583,15 @@
         const previous = button.innerHTML;
         button.disabled = true;
         button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 正在打开结账...';
+        const requestKeyStorageKey = `landpptCheckoutRequest:${packId}`;
         try {
-            const idempotencyKey = crypto.randomUUID();
+            // Keep the same key until the server responds. If the request reached
+            // Stripe but the response was lost, a retry must resume that order.
+            let idempotencyKey = sessionStorage.getItem(requestKeyStorageKey);
+            if (!idempotencyKey) {
+                idempotencyKey = crypto.randomUUID();
+                sessionStorage.setItem(requestKeyStorageKey, idempotencyKey);
+            }
             const res = await fetch('/billing/api/checkout', {
                 method: 'POST',
                 headers: {
@@ -585,6 +602,7 @@
             });
             const data = await res.json();
             if (!res.ok) throw new Error(data.detail || '暂时无法发起付款');
+            sessionStorage.removeItem(requestKeyStorageKey);
             sessionStorage.setItem('landpptPendingPaymentOrder', data.order_id);
             window.location.assign(data.checkout_url);
         } catch (e) {
@@ -655,35 +673,47 @@
             'daily_checkin': '每日签到',
             'invite_reward': '邀请码赠送'
         };
-        tbody.innerHTML = transactions.map(t => `
-            <tr>
-                <td>${new Date(t.created_at * 1000).toLocaleString()}</td>
-                <td>${typeLabels[t.transaction_type] || t.transaction_type}</td>
-                <td>${t.description}</td>
-                <td class="${t.amount >= 0 ? 'amount-positive' : 'amount-negative'}">
-                    ${t.amount >= 0 ? '+' : ''}${t.amount}
-                </td>
-                <td>${t.balance_after}</td>
-            </tr>
-        `).join('');
+        const rows = transactions.map(t => {
+            const row = document.createElement('tr');
+            const values = [
+                new Date(Number(t.created_at) * 1000).toLocaleString(),
+                typeLabels[t.transaction_type] || t.transaction_type,
+                t.description,
+                `${Number(t.amount) >= 0 ? '+' : ''}${t.amount}`,
+                t.balance_after
+            ];
+            values.forEach((value, index) => {
+                const cell = document.createElement('td');
+                cell.textContent = String(value ?? '');
+                if (index === 3) {
+                    cell.className = Number(t.amount) >= 0 ? 'amount-positive' : 'amount-negative';
+                }
+                row.append(cell);
+            });
+            return row;
+        });
+        tbody.replaceChildren(...rows);
     }
 
     function renderPagination(totalPages) {
         const div = document.getElementById('pagination');
-        if (totalPages <= 1) { div.innerHTML = ''; return; }
-        const parts = [];
+        div.replaceChildren();
+        totalPages = Math.max(0, Number.parseInt(totalPages, 10) || 0);
+        if (totalPages <= 1) return;
 
         const addButton = (label, page, { active = false, disabled = false } = {}) => {
-            const safeLabel = String(label);
-            if (disabled) {
-                parts.push(`<button disabled>${safeLabel}</button>`);
-                return;
+            const button = document.createElement('button');
+            button.textContent = String(label);
+            button.disabled = disabled;
+            if (active) button.className = 'active';
+            if (!disabled) {
+                button.addEventListener('click', () => loadTransactions(page));
             }
-            parts.push(`<button class="${active ? 'active' : ''}" onclick="loadTransactions(${page})">${safeLabel}</button>`);
+            div.append(button);
         };
 
         const addEllipsis = () => {
-            parts.push('<button disabled>...</button>');
+            addButton('...', 0, { disabled: true });
         };
 
         // Prev
@@ -709,7 +739,6 @@
         // Next
         addButton('下一页', currentPage + 1, { disabled: currentPage >= totalPages });
 
-        div.innerHTML = parts.join('');
     }
 
     async function loadCheckinStatus() {

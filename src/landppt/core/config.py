@@ -942,6 +942,9 @@ class AppConfig(BaseSettings):
     allow_header_session_auth: bool = Field(
         default=False, env="LANDPPT_ALLOW_HEADER_SESSION_AUTH"
     )
+    metrics_bearer_token: Optional[str] = Field(
+        default=None, env="LANDPPT_METRICS_BEARER_TOKEN"
+    )
 
     # File Upload Configuration
     max_file_size: int = Field(default=10 * 1024 * 1024, env="MAX_FILE_SIZE")  # 10MB

@@ -180,7 +180,10 @@ class ProjectRepository:
             await self.session.rollback()
             raise
 
-    async def delete(self, project_id: str, user_id: Optional[int] = None) -> bool:
+    async def delete(self, project_id: str, user_id: Optional[int] = None,
+        *,
+        delete_artifact_bytes: bool = True,
+    ) -> bool:
         """Delete project and all related records. If user_id is provided, enforces ownership."""
         from .models import (
             TodoStage,
@@ -208,6 +211,26 @@ class ProjectRepository:
             return False
 
         try:
+            if delete_artifact_bytes:
+                from ..services.storage import get_artifact_storage
+
+                artifacts = list(
+                    (
+                        await self.session.execute(
+                            select(Artifact).where(Artifact.project_id == project_id)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                storage = get_artifact_storage()
+                for artifact in artifacts:
+                    if artifact.storage_backend != storage.backend_name:
+                        raise RuntimeError(
+                            "Project artifacts use a storage backend that is not active"
+                        )
+                    await storage.delete(artifact.storage_key)
+
             # Delete related records in order (child tables first)
             # 1. Delete todo_stages (references todo_boards and projects)
             await self.session.execute(

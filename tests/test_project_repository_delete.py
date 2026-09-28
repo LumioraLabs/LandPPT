@@ -38,10 +38,26 @@ class _AsyncSessionAdapter:
 
 
 @pytest.mark.asyncio
-async def test_delete_project_also_cleans_legacy_slide_revisions(tmp_path):
+async def test_delete_project_also_cleans_legacy_slide_revisions(
+    tmp_path, monkeypatch
+):
     """删除项目时应兼容清理历史 slide_revisions 表，避免外键删除失败。"""
     db_path = tmp_path / "project_delete.sqlite3"
     engine = create_engine(f"sqlite:///{db_path}")
+
+    class FakeStorage:
+        backend_name = "minio"
+
+        def __init__(self):
+            self.deleted = []
+
+        async def delete(self, key):
+            self.deleted.append(key)
+
+    storage = FakeStorage()
+    monkeypatch.setattr(
+        "landppt.services.storage.get_artifact_storage", lambda: storage
+    )
 
     @event.listens_for(engine, "connect")
     def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
@@ -149,5 +165,6 @@ async def test_delete_project_also_cleans_legacy_slide_revisions(tmp_path):
             assert slide_revision_count == 0
             assert artifact_count == 0
             assert async_task_count == 0
+            assert storage.deleted == ["exports/project-1/task-1.pdf"]
     finally:
         engine.dispose()

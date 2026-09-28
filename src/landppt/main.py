@@ -15,6 +15,7 @@ from fastapi.responses import (
 from importlib.metadata import PackageNotFoundError, version as package_version
 import uvicorn
 import asyncio
+import hmac
 import logging
 import os
 import sys
@@ -310,12 +311,27 @@ async def readiness_check():
 
 @app.get("/metrics", response_class=PlainTextResponse)
 async def metrics(request: Request):
-    """Prometheus metrics. Anonymous callers are rejected."""
-    if getattr(request.state, "user", None) is None:
-        raise HTTPException(status_code=401, detail="Authentication required")
-    return PlainTextResponse(
+    """Prometheus metrics protected by a dedicated machine credential."""
+    configured_token = str(app_config.metrics_bearer_token or "").strip()
+    authorization = (request.headers.get("authorization") or "").strip()
+    supplied_token = (
+        authorization[7:].strip()
+        if authorization.lower().startswith("bearer ")
+        else ""
+    )
+    if not configured_token or not hmac.compare_digest(
+        supplied_token, configured_token
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid metrics credential",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    response = PlainTextResponse(
         metrics_collector.render_prometheus(), media_type="text/plain; version=0.0.4"
     )
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def main() -> None:

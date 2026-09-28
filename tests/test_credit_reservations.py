@@ -183,6 +183,128 @@ async def test_expired_reservation_is_released_after_worker_death(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_active_billable_work_renews_its_reservation(tmp_path, monkeypatch):
+    from landppt.database.models import CreditReservation, User
+    from landppt.services.credits_service import (
+        CreditsService,
+        run_billable_work,
+        sweep_expired_credit_reservations,
+    )
+
+    engine, maker = await _billing_database(tmp_path)
+    async with engine.begin() as connection:
+        await connection.run_sync(
+            lambda sync_connection: CreditReservation.__table__.create(
+                sync_connection
+            )
+        )
+    user = await _create_user(maker)
+    async with maker() as session:
+        await session.execute(
+            User.__table__.update()
+            .where(User.id == user.id)
+            .values(credits_balance=20)
+        )
+        await session.commit()
+
+    async def slow_work():
+        await asyncio.sleep(1.2)
+        return {"units": 1}
+
+    try:
+        monkeypatch.setattr("landppt.database.database.AsyncSessionLocal", maker)
+        sweep = asyncio.create_task(
+            sweep_expired_credit_reservations(interval_seconds=0.05)
+        )
+        try:
+            result = await run_billable_work(
+                user_id=user.id,
+                operation_id="slow-edit",
+                operation_type="ai_edit",
+                quantity=1,
+                work=slow_work,
+                successful_units=lambda payload: payload["units"],
+                session_factory=maker,
+                ttl_seconds=1,
+            )
+        finally:
+            sweep.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await sweep
+
+        async with maker() as session:
+            balance = await session.scalar(
+                select(User.credits_balance).where(User.id == user.id)
+            )
+            status = await session.scalar(
+                select(CreditReservation.status).where(
+                    CreditReservation.operation_id == "slow-edit"
+                )
+            )
+        assert result["state"] == "committed"
+        assert balance == 17
+        assert status == "committed"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_expiry_candidate_does_not_release_a_renewed_hold(tmp_path):
+    from landppt.database.models import CreditReservation, User
+    from landppt.services.credits_service import CreditsService
+
+    engine, maker = await _billing_database(tmp_path)
+    async with engine.begin() as connection:
+        await connection.run_sync(
+            lambda sync_connection: CreditReservation.__table__.create(
+                sync_connection
+            )
+        )
+    user = await _create_user(maker)
+    async with maker() as session:
+        await session.execute(
+            User.__table__.update()
+            .where(User.id == user.id)
+            .values(credits_balance=10)
+        )
+        await session.commit()
+    try:
+        async with maker() as session:
+            ok, _message, state = await CreditsService(session).reserve_for_operation(
+                user.id, "renewed-job", "ai_edit", 1, ttl_seconds=1
+            )
+            assert ok and state == "created"
+        async with maker() as session:
+            reservation = await session.scalar(
+                select(CreditReservation).where(
+                    CreditReservation.operation_id == "renewed-job"
+                )
+            )
+            stale_cutoff = reservation.expires_at
+            ok, _message = await CreditsService(session).renew_reservation(
+                "renewed-job", ttl_seconds=60
+            )
+            assert ok
+        async with maker() as session:
+            released, _message = await CreditsService(session).release_reservation(
+                "renewed-job", "expired", expired_before=stale_cutoff
+            )
+            status = await session.scalar(
+                select(CreditReservation.status).where(
+                    CreditReservation.operation_id == "renewed-job"
+                )
+            )
+            balance = await session.scalar(
+                select(User.credits_balance).where(User.id == user.id)
+            )
+        assert not released
+        assert status == "reserved"
+        assert balance == 7
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_second_release_of_the_same_operation_restores_the_balance(tmp_path):
     """reserve/release/reserve/release must not collide on the release idempotency key."""
     from landppt.database.models import User

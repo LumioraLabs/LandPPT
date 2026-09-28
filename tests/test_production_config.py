@@ -22,6 +22,7 @@ _SECRET = "p" * 48
 _ENCRYPTION_KEY = "e" * 32
 _STRIPE_KEY = "sk_test_" + ("k" * 24)
 _WEBHOOK_SECRET = "whsec_" + ("w" * 24)
+_METRICS_TOKEN = "m" * 48
 
 
 def _config(**overrides) -> AppConfig:
@@ -45,6 +46,7 @@ def _config(**overrides) -> AppConfig:
         "stripe_secret_key": _STRIPE_KEY,
         "stripe_webhook_secret": _WEBHOOK_SECRET,
         "billing_credit_packs_json": _PACK,
+        "metrics_bearer_token": _METRICS_TOKEN,
     }
     values.update(overrides)
     return AppConfig(**values)
@@ -55,7 +57,13 @@ def _refusal(setting: str, **overrides) -> str:
         validate_production_config(_config(**overrides))
     message = str(caught.value)
     assert setting in message
-    for secret in (_SECRET, _ENCRYPTION_KEY, _STRIPE_KEY, _WEBHOOK_SECRET):
+    for secret in (
+        _SECRET,
+        _ENCRYPTION_KEY,
+        _STRIPE_KEY,
+        _WEBHOOK_SECRET,
+        _METRICS_TOKEN,
+    ):
         assert secret not in message
     return message
 
@@ -114,6 +122,8 @@ def test_complete_production_config_is_accepted():
         ("LANDPPT_TRUSTED_PROXY_CIDRS", {"trusted_proxy_cidrs": ""}),
         ("LANDPPT_TRUSTED_PROXY_CIDRS", {"trusted_proxy_cidrs": "not-a-cidr"}),
         ("LANDPPT_CORS_ALLOWED_ORIGINS", {"cors_allowed_origins": "*"}),
+        ("LANDPPT_METRICS_BEARER_TOKEN", {"metrics_bearer_token": None}),
+        ("LANDPPT_METRICS_BEARER_TOKEN", {"metrics_bearer_token": "short"}),
         (
             "DATABASE_URL",
             {"database_url": "sqlite:///./landppt.db", "allow_sqlite_in_production": False},

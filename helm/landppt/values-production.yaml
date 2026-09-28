@@ -49,7 +49,8 @@ app:
   # app.existingSecret / existingSecretKeys are supplied at install time.
   # Required existingSecret keys (names only; never commit the values):
   # SECRET_KEY, LANDPPT_CONFIG_ENCRYPTION_KEYS, STRIPE_SECRET_KEY,
-  # STRIPE_WEBHOOK_SECRET, LANDPPT_BILLING_CREDIT_PACKS_JSON
+  # STRIPE_WEBHOOK_SECRET, LANDPPT_BILLING_CREDIT_PACKS_JSON,
+  # LANDPPT_METRICS_BEARER_TOKEN
   production: true
   env:
     LANDPPT_DEPLOYMENT_MODE: "production"

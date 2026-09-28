@@ -21,6 +21,7 @@ app:
     - STRIPE_SECRET_KEY
     - STRIPE_WEBHOOK_SECRET
     - LANDPPT_BILLING_CREDIT_PACKS_JSON
+    - LANDPPT_METRICS_BEARER_TOKEN
   env:
     LANDPPT_PUBLIC_BASE_URL: https://slides.example.com
     LANDPPT_ALLOWED_HOSTS: slides.example.com
@@ -32,6 +33,9 @@ postgresql:
 minio:
   auth:
     rootPassword: stand-in-not-a-secret
+observability:
+  serviceMonitor:
+    enabled: true
 """
 
 
@@ -130,6 +134,10 @@ def test_production_render_fails_closed_and_complete_render_is_routable(tmp_path
     assert "name: wait-for-postgres" in rendered
     assert "name: Host" in rendered
     assert "slides.example.com" in rendered
+    service_monitor = rendered.split("kind: ServiceMonitor", 1)[1].split("---", 1)[0]
+    assert "type: Bearer" in service_monitor
+    assert "name: landppt-keys" in service_monitor
+    assert "key: LANDPPT_METRICS_BEARER_TOKEN" in service_monitor
     policy = rendered.split("kind: NetworkPolicy", 1)[1].split("---", 1)[0]
     component = policy.split("app.kubernetes.io/component", 1)[1].split("policyTypes:", 1)[0]
     assert "- web" in component

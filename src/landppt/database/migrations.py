@@ -2387,30 +2387,51 @@ class DatabaseMigration:
     async def migrate_up(self, target_version: str = None) -> bool:
         """Run migrations up to target version"""
         try:
-            async with AsyncSessionLocal() as session:
-                await self._postgres_migration_lock(session, release=False)
-                try:
-                    return await self._migrate_up_locked(session, target_version)
-                finally:
-                    try:
-                        await self._postgres_migration_lock(session, release=True)
-                    except Exception:
-                        logger.warning(
-                            "Failed to release the PostgreSQL migration lock",
-                            exc_info=True,
+            # A PostgreSQL session-level advisory lock belongs to one physical
+            # connection. Keep that connection checked out across the per-
+            # migration commits; otherwise the pool may hand the locked
+            # connection to another init container while this runner continues
+            # on a different connection.
+            if (
+                async_engine is not None
+                and getattr(async_engine.dialect, "name", "") == "postgresql"
+            ):
+                async with async_engine.connect() as connection:
+                    async with AsyncSession(
+                        bind=connection, expire_on_commit=False
+                    ) as session:
+                        return await self._migrate_up_with_lock(
+                            session, target_version
                         )
-                        try:
-                            connection = await session.connection()
-                            await connection.invalidate()
-                        except Exception:
-                            logger.warning(
-                                "Failed to invalidate the migration connection",
-                                exc_info=True,
-                            )
+            async with AsyncSessionLocal() as session:
+                return await self._migrate_up_with_lock(session, target_version)
 
         except Exception as e:
             logger.error(f"Migration failed: {e}")
             return False
+
+    async def _migrate_up_with_lock(
+        self, session: AsyncSession, target_version: str = None
+    ) -> bool:
+        await self._postgres_migration_lock(session, release=False)
+        try:
+            return await self._migrate_up_locked(session, target_version)
+        finally:
+            try:
+                await self._postgres_migration_lock(session, release=True)
+            except Exception:
+                logger.warning(
+                    "Failed to release the PostgreSQL migration lock",
+                    exc_info=True,
+                )
+                try:
+                    connection = await session.connection()
+                    await connection.invalidate()
+                except Exception:
+                    logger.warning(
+                        "Failed to invalidate the migration connection",
+                        exc_info=True,
+                    )
 
     async def _migrate_up_locked(self, session: AsyncSession, target_version: str = None) -> bool:
         """Apply pending migrations while the caller holds any database lock."""

@@ -285,3 +285,53 @@ def test_billing_migration_is_registered():
         migration["version"] == "022" and migration["name"] == "add_payment_orders"
         for migration in migration_manager.migrations
     )
+
+
+@pytest.mark.asyncio
+async def test_stripe_webhook_body_has_a_hard_size_limit():
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    from landppt.web.billing_routes import (
+        MAX_STRIPE_WEBHOOK_BYTES,
+        _read_webhook_body,
+    )
+
+    oversized = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/billing/webhooks/stripe",
+            "headers": [
+                (b"content-length", str(MAX_STRIPE_WEBHOOK_BYTES + 1).encode())
+            ],
+        }
+    )
+    with pytest.raises(HTTPException) as declared_error:
+        await _read_webhook_body(oversized)
+    assert declared_error.value.status_code == 413
+
+    chunks = [
+        {
+            "type": "http.request",
+            "body": b"a" * MAX_STRIPE_WEBHOOK_BYTES,
+            "more_body": True,
+        },
+        {"type": "http.request", "body": b"b", "more_body": False},
+    ]
+
+    async def receive():
+        return chunks.pop(0)
+
+    streamed = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/billing/webhooks/stripe",
+            "headers": [],
+        },
+        receive,
+    )
+    with pytest.raises(HTTPException) as streamed_error:
+        await _read_webhook_body(streamed)
+    assert streamed_error.value.status_code == 413

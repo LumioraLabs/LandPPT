@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
+from ..auth.auth_service import get_auth_service
+from ..auth.cookies import clear_session_cookie
 from ..auth.middleware import get_current_user_required
 from ..database.database import AsyncSessionLocal
 from ..database.models import User
@@ -14,7 +17,8 @@ router = APIRouter(prefix="/api/account", tags=["account"])
 
 
 class DeleteAccountRequest(BaseModel):
-    password: str
+    password: str = ""
+    confirmation: str = Field(default="", max_length=100)
 
 
 @router.get("/export")
@@ -29,9 +33,14 @@ async def delete_account(
     body: DeleteAccountRequest,
     user: User = Depends(get_current_user_required),
 ):
-    """Delete the authenticated user's content after password confirmation."""
+    """Delete the authenticated user's content after reauthentication."""
     async with AsyncSessionLocal() as session:
-        deleted = await delete_user_account(session, user.id, body.password)
+        deleted = await delete_user_account(
+            session, user.id, body.password, body.confirmation
+        )
     if not deleted:
         raise HTTPException(status_code=403, detail="Password confirmation failed")
-    return {"deleted": True}
+    await get_auth_service().invalidate_user_sessions_cache(user.id)
+    response = JSONResponse({"deleted": True})
+    clear_session_cookie(response)
+    return response

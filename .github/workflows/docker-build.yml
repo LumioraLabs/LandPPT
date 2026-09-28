@@ -45,12 +45,58 @@ env:
   PLATFORMS: linux/amd64
 
 jobs:
+  quality:
+    name: Test and Validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Install locked test environment
+        run: uv sync --frozen --extra test
+
+      - name: Reject whitespace errors in the proposed change
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          if [[ -n "$BASE_SHA" && "$BASE_SHA" != "0000000000000000000000000000000000000000" ]]; then
+            git diff --check "$BASE_SHA...$HEAD_SHA"
+          else
+            git diff --check HEAD^
+          fi
+
+      - name: Compile Python sources
+        run: uv run python -m compileall -q src tests
+
+      - name: Run test suite
+        run: uv run pytest -q
+
   build:
     name: Build Docker Image
     runs-on: ubuntu-latest
+    needs: quality
     
     permissions:
-      contents: write
+      contents: read
       packages: write
     
     steps:
@@ -135,10 +181,33 @@ jobs:
             BUILDTIME=${{ github.event.repository.updated_at }}
             VERSION=${{ github.sha }}
       
-      # 源码变更后，把新镜像 tag 写回 Argo CD values 文件。
-      # Argo CD 监听 helm/landppt/values-argocd.yaml，检测到该提交后会自动同步部署。
+      # 输出镜像摘要
+      - name: Image Digest
+        run: |
+          echo "### Docker Image Built Successfully! :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image Tags:**" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Argo CD image tag:** \`git-${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+
+  deploy:
+    name: Update Argo CD Image
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name != 'pull_request' && (github.event.inputs.push_image != 'false')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # Argo CD watches this values file and deploys only after quality and image
+      # build jobs have succeeded. The write token exists only in this deploy job.
       - name: Update Argo CD image tag
-        if: github.event_name != 'pull_request' && (github.event.inputs.push_image != 'false')
         env:
           IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/landppt
           IMAGE_TAG: git-${{ github.sha }}
@@ -179,18 +248,6 @@ jobs:
             git commit -m "chore(deploy): update image to ${IMAGE_TAG} [skip ci]"
             git push origin HEAD:${GITHUB_REF_NAME}
           fi
-
-      # 输出镜像摘要
-      - name: Image Digest
-        run: |
-          echo "### Docker Image Built Successfully! :rocket:" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Image Tags:**" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Argo CD image tag:** \`git-${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
 
   # 安全扫描（可选但推荐）
   security-scan:

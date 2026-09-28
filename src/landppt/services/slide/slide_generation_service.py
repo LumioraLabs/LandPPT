@@ -31,6 +31,7 @@ class SlideGenerationService:
                 cache = None
                 credits_reference_id = None
                 credits_reservation_owned = False
+                credits_reservation_heartbeat = None
 
                 project = await self.project_manager.get_project(project_id)
                 if not project:
@@ -383,7 +384,11 @@ class SlideGenerationService:
                     and credits_expected_new_slides > 0
                     and self.user_id is not None
                 ):
-                    from ..credits_service import CreditsService, billable_work_may_start
+                    from ..credits_service import (
+                        CreditsService,
+                        billable_work_may_start,
+                        keep_credit_reservation_alive,
+                    )
                     from ...database.database import AsyncSessionLocal
 
                     async with AsyncSessionLocal() as session:
@@ -402,6 +407,10 @@ class SlideGenerationService:
                     credits_reservation_owned = reserve_state == "created"
                     if not reserved_ok:
                         credits_reservation_owned = False
+                    if credits_reservation_owned:
+                        credits_reservation_heartbeat = asyncio.create_task(
+                            keep_credit_reservation_alive(credits_reference_id)
+                        )
 
                 # Cache service (used for cooperative cancellation)
                 try:
@@ -453,7 +462,16 @@ class SlideGenerationService:
                             if credits_reservation_owned and credits_reference_id:
                                 try:
                                     from ...database.database import AsyncSessionLocal
-                                    from ..credits_service import CreditsService
+                                    from ..credits_service import (
+                                        CreditsService,
+                                        _stop_reservation_heartbeat,
+                                    )
+
+                                    if credits_reservation_heartbeat is not None:
+                                        await _stop_reservation_heartbeat(
+                                            credits_reservation_heartbeat
+                                        )
+                                        credits_reservation_heartbeat = None
 
                                     async with AsyncSessionLocal() as session:
                                         await CreditsService(session).release_reservation(
@@ -816,7 +834,16 @@ class SlideGenerationService:
                 if credits_reservation_owned and credits_reference_id:
                     try:
                         from ...database.database import AsyncSessionLocal
-                        from ..credits_service import CreditsService
+                        from ..credits_service import (
+                            CreditsService,
+                            _stop_reservation_heartbeat,
+                        )
+
+                        if credits_reservation_heartbeat is not None:
+                            await _stop_reservation_heartbeat(
+                                credits_reservation_heartbeat
+                            )
+                            credits_reservation_heartbeat = None
 
                         async with AsyncSessionLocal() as session:
                             billed_ok, billed_msg, _charged = await CreditsService(
@@ -874,7 +901,16 @@ class SlideGenerationService:
             except asyncio.CancelledError:
                 if credits_reservation_owned and credits_reference_id:
                     from ...database.database import AsyncSessionLocal
-                    from ..credits_service import CreditsService
+                    from ..credits_service import (
+                        CreditsService,
+                        _stop_reservation_heartbeat,
+                    )
+
+                    if credits_reservation_heartbeat is not None:
+                        await _stop_reservation_heartbeat(
+                            credits_reservation_heartbeat
+                        )
+                        credits_reservation_heartbeat = None
 
                     async with AsyncSessionLocal() as session:
                         await CreditsService(session).release_reservation(
@@ -885,7 +921,16 @@ class SlideGenerationService:
                 if credits_reservation_owned and credits_reference_id:
                     try:
                         from ...database.database import AsyncSessionLocal
-                        from ..credits_service import CreditsService
+                        from ..credits_service import (
+                            CreditsService,
+                            _stop_reservation_heartbeat,
+                        )
+
+                        if credits_reservation_heartbeat is not None:
+                            await _stop_reservation_heartbeat(
+                                credits_reservation_heartbeat
+                            )
+                            credits_reservation_heartbeat = None
 
                         async with AsyncSessionLocal() as session:
                             await CreditsService(session).release_reservation(
@@ -914,3 +959,12 @@ class SlideGenerationService:
                 error_message = f'生成过程中出现错误：{str(e)}'
                 error_response = {'type': 'error', 'message': error_message}
                 yield f"data: {json.dumps(error_response)}\n\n"
+            finally:
+                # Closing an SSE generator does not necessarily raise
+                # CancelledError. Always stop its background lease renewal.
+                if credits_reservation_heartbeat is not None:
+                    from ..credits_service import _stop_reservation_heartbeat
+
+                    await _stop_reservation_heartbeat(
+                        credits_reservation_heartbeat
+                    )

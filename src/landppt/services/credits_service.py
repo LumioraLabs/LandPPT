@@ -3,8 +3,9 @@ Credits service for managing user credits consumption and recharge
 """
 
 import asyncio
-import time
 import logging
+import time
+from contextlib import suppress
 from typing import Dict, Any, Optional, List, Tuple
 from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -520,8 +521,41 @@ class CreditsService:
         await self.session.commit()
         return True, f"已确认 {charge} 积分", charge
 
+    async def renew_reservation(
+        self, operation_id: str, *, ttl_seconds: int = 900
+    ) -> Tuple[bool, str]:
+        """Extend an active hold so the expiry sweeper cannot release live work."""
+        try:
+            normalized_id = self._normalize_idempotency_key(operation_id)
+        except ValueError as exc:
+            return False, str(exc)
+        if not normalized_id:
+            return False, "操作编号不能为空"
+
+        reservation = await self.session.scalar(
+            select(CreditReservation)
+            .where(CreditReservation.operation_id == normalized_id)
+            .with_for_update()
+        )
+        if reservation is None:
+            await self.session.rollback()
+            return False, "积分预留不存在"
+        if reservation.status != "reserved":
+            await self.session.rollback()
+            return False, "积分预留已结束"
+
+        now = _next_timestamp(reservation.updated_at)
+        reservation.expires_at = now + max(1, int(ttl_seconds))
+        reservation.updated_at = now
+        await self.session.commit()
+        return True, "积分预留已续期"
+
     async def release_reservation(
-        self, operation_id: str, reason: str = "released"
+        self,
+        operation_id: str,
+        reason: str = "released",
+        *,
+        expired_before: Optional[float] = None,
     ) -> Tuple[bool, str]:
         """Return a held reservation. A committed operation stays charged."""
         try:
@@ -542,6 +576,14 @@ class CreditsService:
         if reservation.status == "released":
             await self.session.rollback()
             return True, "请求已释放"
+        if (
+            expired_before is not None
+            and reservation.expires_at > float(expired_before)
+        ):
+            # The sweeper may have selected this operation immediately before its
+            # worker renewed the lease. Re-check while holding the row lock.
+            await self.session.rollback()
+            return False, "积分预留已续期"
         balance = await self._change_balance(
             reservation.user_id, reservation.reserved_amount
         )
@@ -589,7 +631,9 @@ class CreditsService:
         )
         released = 0
         for operation_id in expired:
-            ok, _message = await self.release_reservation(operation_id, "expired")
+            ok, _message = await self.release_reservation(
+                operation_id, "expired", expired_before=moment
+            )
             if ok:
                 released += 1
         return released
@@ -756,6 +800,52 @@ async def sweep_expired_credit_reservations(interval_seconds: float = 30) -> Non
         await asyncio.sleep(interval_seconds)
 
 
+async def keep_credit_reservation_alive(
+    operation_id: str,
+    *,
+    session_factory=None,
+    ttl_seconds: int = 900,
+    interval_seconds: Optional[float] = None,
+) -> None:
+    """Renew a reservation until cancelled by the worker that owns it."""
+    from ..database.database import AsyncSessionLocal
+
+    factory = session_factory or AsyncSessionLocal
+    interval = (
+        max(0.1, min(float(ttl_seconds) / 3, 300.0))
+        if interval_seconds is None
+        else max(0.01, float(interval_seconds))
+    )
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            async with factory() as session:
+                ok, message = await CreditsService(session).renew_reservation(
+                    operation_id, ttl_seconds=ttl_seconds
+                )
+            if not ok:
+                logger.warning(
+                    "Stopped credit reservation heartbeat for %s: %s",
+                    operation_id,
+                    message,
+                )
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # A transient database failure must not permanently kill renewal. The
+            # next tick can still extend the lease before it expires.
+            logger.exception(
+                "Credit reservation heartbeat failed for %s", operation_id
+            )
+
+
+async def _stop_reservation_heartbeat(task: asyncio.Task) -> None:
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
 async def run_billable_work(
     *,
     user_id: int,
@@ -791,14 +881,28 @@ async def run_billable_work(
             "repeated": state in {"committed", "reserved"},
         }
 
+    heartbeat = asyncio.create_task(
+        keep_credit_reservation_alive(
+            operation_id,
+            session_factory=factory,
+            ttl_seconds=ttl_seconds,
+        )
+    )
     try:
         result = await work()
+        units = int(successful_units(result))
+    except asyncio.CancelledError:
+        await _stop_reservation_heartbeat(heartbeat)
+        async with factory() as session:
+            await CreditsService(session).release_reservation(operation_id, "cancelled")
+        raise
     except Exception:
+        await _stop_reservation_heartbeat(heartbeat)
         async with factory() as session:
             await CreditsService(session).release_reservation(operation_id, "failure")
         raise
 
-    units = int(successful_units(result))
+    await _stop_reservation_heartbeat(heartbeat)
     async with factory() as session:
         committed_ok, committed_message, charged = await CreditsService(
             session

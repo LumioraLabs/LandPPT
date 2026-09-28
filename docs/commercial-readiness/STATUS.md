@@ -1,14 +1,14 @@
 # Commercial Readiness Status
 
-Last updated: 2026-09-26 (America/Toronto)
+Last updated: 2026-09-27 (America/Toronto)
 
 ## Executive status
 
 Current verdict: **not ready for a mature paid public launch**.
 
-Phase 1 of the implementation plan is now in the worktree: the full automated suite is green, production mode refuses insecure settings before migrations, SQLite and PostgreSQL migration rehearsals pass, and the production Helm chart fails closed until the public URL, hosts, proxy CIDRs, billing flags, and existing-secret key names are supplied. Payment recovery, usage reservations, legal/privacy workflows, observability ownership, backups, and live-environment validation are still open.
+The local automated suite is green, production mode refuses insecure settings before migrations, SQLite migration rehearsals pass, and the production Helm chart fails closed until required public, security, billing, encryption, and metrics-secret settings are supplied. Payment recovery and usage reservations are substantially implemented. Current PostgreSQL, live Stripe, legal, production infrastructure, observability ownership, accessibility, and browser acceptance remain open.
 
-No implementation in this worktree has been committed.
+The PR implementation is committed through `d3c558d`; the review fixes described below are currently uncommitted on `feat/commercial-readiness`.
 
 ## Implemented
 
@@ -113,6 +113,22 @@ Primary files:
 
 This payment implementation is not considered production-complete until the recovery, reconciliation, refund-policy, tax, live-mode, and operational items in `IMPLEMENTATION_PLAN.md` are complete.
 
+### PR review hardening
+
+- [x] API login/logout set and clear the centralized session cookie.
+- [x] Login limits are consumed before Argon2 verification.
+- [x] Database session state is authoritative on protected requests; stale cache entries cannot preserve revoked access.
+- [x] Account deletion invalidates cached sessions, clears the cookie, removes mapped non-financial records and stored artifact bytes, and anonymizes direct identifiers.
+- [x] Account export is no longer capped at 10,000 ledger rows and covers mapped user/project records without password hashes, API-key hashes, salts, or session IDs.
+- [x] Normal project deletion removes its local/S3 artifact objects before metadata.
+- [x] Public Stripe webhook bodies have a 1 MiB ceiling.
+- [x] Checkout retries retain their idempotency key across ambiguous browser/network failures.
+- [x] Credits-page API text is rendered with safe DOM text nodes.
+- [x] Active billable work renews reservation leases, and the sweeper cannot release a newly renewed hold selected from stale state.
+- [x] PostgreSQL migration advisory locks retain one checked-out physical connection across migration commits.
+- [x] Prometheus metrics use a dedicated bearer token, production validates it, and ServiceMonitor reads it from a Secret.
+- [x] Docker build/publish depends on a full test gate; repository write permission is isolated to the deployment job.
+
 ### Miscellaneous
 
 - [x] The package CLI entry point now resolves a real `main()` function.
@@ -156,15 +172,21 @@ Previous complete-suite result after the Stripe implementation, before the regre
 982 passed, 45 failed, 16 skipped, 27 warnings, 8 subtests passed
 ```
 
-Latest complete-suite result:
+Previous complete-suite result before this PR review:
 
 ```text
 1120 passed, 19 skipped, 11 warnings, 8 subtests passed in 48.78s
 ```
 
+Latest complete-suite result after the PR review fixes:
+
+```text
+1130 passed, 19 skipped, 11 warnings, 8 subtests passed in 56.31s
+```
+
 The 45 failures from the previous run were fixed in shipped code: prompt and header/footer contracts, repository-relative paths, migration `022`, the missing `tests/Qwen3-TD-TTS.json` workflow fixture, free-template selection, user-scoped image-cache clearing, the stable system-prompt cache prefix, lifespan cancellation, MiniMax configuration, OpenAI image `response_format`, outline time context, runtime system-prompt pass-through, placeholder SVG self-validation, and portable subtitle paths. `git diff --check` is clean and `python -m compileall -q src/landppt` reports no errors. Both `landppt --help` and `landppt-cli --help` exit 0 without serving.
 
-SQLite migration tests drive `DatabaseMigration.migrate_up` / `migrate_down`: fresh `001`–`022`, upgrade from a schema whose migration record stops at `018`, rollback of `022`, and a forced secret-encryption failure that leaves plaintext and ciphertext bytes unchanged and raises from `run_startup_migrations`. The same fresh and `018` upgrade paths, plus concurrent credit consumption, passed again on PostgreSQL 16.2 (`2 passed in 3.65s`). PostgreSQL migrators take one session advisory lock so the chart's per-pod migrate initContainers cannot apply the same migration at once.
+SQLite migration tests drive `DatabaseMigration.migrate_up` / `migrate_down`: fresh `001`–`022`, upgrade from a schema whose migration record stops at `018`, rollback of `022`, and a forced secret-encryption failure that leaves plaintext and ciphertext bytes unchanged and raises from `run_startup_migrations`. Historical notes recorded a PostgreSQL 16.2 run, but the current local run skipped PostgreSQL-dependent tests because `LANDPPT_TEST_POSTGRES_URL` was not configured; a current PostgreSQL rehearsal remains required. PostgreSQL migrators now retain one checked-out connection while holding the session advisory lock.
 
 Production configuration tests construct `AppConfig` directly. With `LANDPPT_DEPLOYMENT_MODE=production`, startup calls `validate_production_config` before `run_startup_initialization`, and `landppt-cli worker` calls the same check before `run_worker`. Development mode still accepts the local defaults. The production chart sets `LANDPPT_DEPLOYMENT_MODE=production` and refuses to render if that value is missing or not `production`/`prod`.
 
@@ -190,14 +212,17 @@ Do not mass-format the entire repository as part of this effort. Restrict format
 - [x] Propagate stable idempotency keys through slide regeneration, AI slide edit, element edit, native dialog, outline optimization, image regeneration, automatic slide images, bullet enhancement, the slide-edit agent, PPT creation, global and free template generation and adjustment, outline generation, speech scripts, and the unattended outline and speech stages. The synchronous requirements-confirmation file/url generator is disabled; its remaining branch reserves before that model call.
 - [x] Add reserve/commit/release semantics for those workflows. Credits are held before the model call, committed only for successful units, and released on failure, cancellation, or expiry. The web process and the worker sweep expired holds. An in-progress hold does not start another model call, and releasing then reserving the same operation id returns the balance.
 - [x] Split liveness from dependency-aware readiness. Web `/health` does not check dependencies. Unauthenticated `GET /ready` and `landppt-cli ready` do, and the web probe Host header is an allowed host. A live multi-replica rollout was not executed.
-- [ ] Protect operational metrics and define monitoring/alerting ownership. Anonymous `GET /metrics` is no longer successful. Alert routing and an on-call owner are still unset.
+- [x] Protect operational metrics with a dedicated bearer token and wire Helm ServiceMonitor authentication.
+- [ ] Define dashboards, alert routing, and monitoring/on-call ownership.
 - [x] Add and verify database and object-storage backup/restore procedures. The verified rehearsal is local SQLite plus a local artifact directory. The production backup destination remains an external dependency.
 
 ### Product, privacy, and legal gaps
 
 - [ ] Terms of service, privacy policy, acceptable-use policy, refund policy, and cookie disclosure.
 - [ ] Explicit policy acceptance and version tracking during registration.
-- [x] User data export, account deletion, and retention/deletion jobs. Export and deletion are limited to the authenticated user. Payment orders and credit ledger rows are retained and the profile is anonymized. Legal retention exceptions beyond that ledger are not a substitute for counsel.
+- [x] User data export and password-account deletion are owner-scoped. Payment orders, reservations, and credit ledger rows are retained while the profile is anonymized; mapped local/S3 artifact objects are removed.
+- [x] OAuth-only accounts can delete only after exact username confirmation while authenticated; password accounts still require password reauthentication.
+- [ ] Finish retention acceptance for legacy file-backed content. Legal retention exceptions require counsel.
 - [ ] Payment receipt/invoice and tax behavior.
 - [ ] Support and escalation workflow for failed payments and account issues.
 - [ ] Final accessibility, mobile, and browser validation.

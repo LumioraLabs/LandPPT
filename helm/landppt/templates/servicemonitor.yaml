@@ -17,4 +17,9 @@ spec:
       path: /metrics
       interval: {{ .Values.observability.serviceMonitor.interval }}
       scrapeTimeout: {{ .Values.observability.serviceMonitor.scrapeTimeout }}
+      authorization:
+        type: Bearer
+        credentials:
+          name: {{ required "observability.serviceMonitor.bearerTokenSecret or app.existingSecret is required" (.Values.observability.serviceMonitor.bearerTokenSecret | default .Values.app.existingSecret) }}
+          key: {{ required "observability.serviceMonitor.bearerTokenSecretKey is required" .Values.observability.serviceMonitor.bearerTokenSecretKey }}
 {{- end }}

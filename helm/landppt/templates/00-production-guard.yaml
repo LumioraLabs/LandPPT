@@ -39,7 +39,7 @@
 {{- if not .Values.app.existingSecret }}
 {{- fail "production requires app.existingSecret; do not commit Stripe or encryption material" }}
 {{- end }}
-{{- $required := list "SECRET_KEY" "LANDPPT_CONFIG_ENCRYPTION_KEYS" "STRIPE_SECRET_KEY" "STRIPE_WEBHOOK_SECRET" "LANDPPT_BILLING_CREDIT_PACKS_JSON" }}
+{{- $required := list "SECRET_KEY" "LANDPPT_CONFIG_ENCRYPTION_KEYS" "STRIPE_SECRET_KEY" "STRIPE_WEBHOOK_SECRET" "LANDPPT_BILLING_CREDIT_PACKS_JSON" "LANDPPT_METRICS_BEARER_TOKEN" }}
 {{- $declared := .Values.app.existingSecretKeys | default (list) }}
 {{- range $key := $required }}
 {{- if not (has $key $declared) }}

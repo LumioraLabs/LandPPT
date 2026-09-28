@@ -1,6 +1,6 @@
 # Commercial Readiness Implementation Plan
 
-Last updated: 2026-09-26 (America/Toronto)
+Last updated: 2026-09-27 (America/Toronto)
 
 ## Release objective
 
@@ -12,12 +12,12 @@ No public paid launch should occur until every **P0 release gate** below is comp
 
 ### 1.1 Full regression gate
 
-- [ ] Run `uv run pytest -q` against the entire repository.
-- [ ] Record every failing test by category: regression, stale expectation, environment-only, or unrelated pre-existing defect.
-- [ ] Fix all security, authentication, authorization, billing, migration, data-integrity, and primary-user-flow failures.
-- [ ] Re-run the focused security suites after each fix batch.
-- [ ] Run `git diff --check` and compile checks.
-- [ ] Verify both CLI entry points without unintentionally starting a server during `--help`.
+- [x] Run `uv run pytest -q` against the entire repository.
+- [x] Record every failing test by category: regression, stale expectation, environment-only, or unrelated pre-existing defect.
+- [x] Fix all security, authentication, authorization, billing, migration, data-integrity, and primary-user-flow failures found by the suite.
+- [x] Re-run the focused security suites after each fix batch.
+- [x] Run `git diff --check` and compile checks.
+- [x] Verify both CLI entry points without unintentionally starting a server during `--help`.
 
 Exit criteria:
 
@@ -26,11 +26,11 @@ Exit criteria:
 
 ### 1.2 Database and migration validation
 
-- [ ] Create a fresh SQLite database and migrate from `001` through `022`.
-- [ ] Upgrade a fixture representing the last released schema through `022`.
+- [x] Create a fresh SQLite database and migrate from `001` through `022`.
+- [x] Upgrade a fixture representing the last released schema through `022`.
 - [ ] Repeat both paths on PostgreSQL.
-- [ ] Verify rollback behavior for reversible migrations.
-- [ ] Verify that secret-encryption migration failures stop startup without corrupting plaintext or ciphertext.
+- [x] Verify rollback behavior for reversible migrations.
+- [x] Verify that secret-encryption migration failures stop startup without corrupting plaintext or ciphertext.
 - [ ] Test concurrent payment/credit operations on PostgreSQL, not only SQLite.
 
 Exit criteria:
@@ -40,15 +40,15 @@ Exit criteria:
 
 ### 1.3 Fail-fast production validation
 
-- [ ] Introduce an explicit production/deployment mode.
-- [ ] Reject placeholder or short `SECRET_KEY` values in production.
-- [ ] Require a dedicated encryption key set in production.
-- [ ] Reject default bootstrap-admin credentials; disable bootstrap after initial provisioning.
-- [ ] Require HTTPS public base URL, secure cookies, CSRF origin checks, and explicit allowed hosts.
-- [ ] Require trusted proxy CIDRs when forwarded headers are expected.
-- [ ] Reject wildcard CORS with credentialed production traffic.
-- [ ] When billing is enabled, require credits enforcement, valid Stripe secrets, and a non-empty validated pack catalog.
-- [ ] Refuse production SQLite unless an explicit development exception exists.
+- [x] Introduce an explicit production/deployment mode.
+- [x] Reject placeholder or short `SECRET_KEY` values in production.
+- [x] Require a dedicated encryption key set in production.
+- [x] Reject default bootstrap-admin credentials; disable bootstrap after initial provisioning.
+- [x] Require HTTPS public base URL, secure cookies, CSRF origin checks, and explicit allowed hosts.
+- [x] Require trusted proxy CIDRs when forwarded headers are expected.
+- [x] Reject wildcard CORS with credentialed production traffic.
+- [x] When billing is enabled, require credits enforcement, valid Stripe secrets, and a non-empty validated pack catalog.
+- [x] Refuse production SQLite unless an explicit development exception exists.
 
 Exit criteria:
 
@@ -57,14 +57,14 @@ Exit criteria:
 
 ### 1.4 Helm and runtime hardening
 
-- [ ] Add production values for public URL, allowed hosts, proxy CIDRs, encryption keys, and billing flags.
-- [ ] Document the required existing-secret keys, including Stripe and encryption material.
-- [ ] Enable and tighten production NetworkPolicy.
-- [ ] Ensure migration jobs receive required secrets and complete before application rollout.
-- [ ] Separate liveness and readiness probes.
-- [ ] Make readiness validate database, cache/queue, and required storage dependencies.
+- [x] Add production values for public URL, allowed hosts, proxy CIDRs, encryption keys, and billing flags.
+- [x] Document the required existing-secret keys, including Stripe, metrics, and encryption material.
+- [x] Enable and tighten production NetworkPolicy.
+- [x] Ensure migration init containers receive required secrets and complete before application rollout.
+- [x] Separate liveness and readiness probes.
+- [x] Make readiness validate database, cache/queue, and required storage dependencies.
 - [ ] Confirm rolling deployment behavior with database migrations and multiple web/worker replicas.
-- [ ] Add chart rendering tests for missing and complete production secrets.
+- [x] Add chart rendering tests for missing and complete production secrets.
 
 Exit criteria:
 
@@ -75,15 +75,15 @@ Exit criteria:
 
 ### 2.1 Payment recovery and reconciliation
 
-- [ ] Test simultaneous deliveries of the same event.
-- [ ] Ensure a delivery that loses a race does not return success if the winner later fails.
-- [ ] Add a lease/retry policy for webhook receipts left in `processing`.
-- [ ] Add a reconciliation command/job for Stripe sessions, payments, refunds, and local orders.
-- [ ] Persist provider request IDs needed for customer support.
-- [ ] Define event-receipt retention and cleanup.
+- [x] Test simultaneous deliveries of the same event.
+- [x] Ensure a delivery that loses a race does not return success if the winner later fails.
+- [x] Add a lease/retry policy for webhook receipts left in `processing`.
+- [x] Add a reconciliation command/job for Stripe sessions, payments, refunds, and local orders.
+- [x] Persist provider request IDs needed for customer support.
+- [x] Define event-receipt retention and cleanup.
 - [ ] Alert on repeated failed receipts or unfulfilled paid orders.
-- [ ] Verify delayed payment success/failure behavior.
-- [ ] Verify test-mode and live-mode isolation.
+- [x] Verify delayed payment success/failure behavior in automated tests.
+- [x] Verify test-mode and live-mode isolation in automated tests.
 
 Exit criteria:
 
@@ -91,12 +91,12 @@ Exit criteria:
 
 ### 2.2 Refund and dispute policy
 
-- [ ] Decide whether refund reversals may create negative balances.
-- [ ] Implement the approved policy for already-spent credits.
-- [ ] Handle charge disputes and dispute reversals.
-- [ ] Define partial-refund rounding behavior.
-- [ ] Prevent customer-facing balances and internal ledgers from diverging.
-- [ ] Add an audited admin workflow for support adjustments.
+- [x] Decide whether refund reversals may create negative balances.
+- [x] Implement the current ledger policy for already-spent credits.
+- [x] Handle charge disputes and dispute reversals.
+- [x] Define partial-refund rounding behavior.
+- [x] Prevent customer-facing balances and internal ledgers from diverging.
+- [x] Add an audited admin workflow for support adjustments.
 
 Exit criteria:
 
@@ -104,13 +104,13 @@ Exit criteria:
 
 ### 2.3 Usage reservation and charging
 
-- [ ] Inventory every call to `consume_credits` and helper wrappers.
-- [ ] Assign a stable operation ID/idempotency key to every billable workflow.
-- [ ] Reserve credits before expensive asynchronous work.
-- [ ] Commit the correct charge for successful units only.
-- [ ] Release or refund reservations on failure, cancellation, timeout, and worker death.
+- [x] Inventory every call to `consume_credits` and helper wrappers.
+- [x] Assign a stable operation ID/idempotency key to every billable workflow.
+- [x] Reserve credits before expensive asynchronous work.
+- [x] Commit the correct charge for successful units only.
+- [x] Release or refund reservations on failure, cancellation, timeout, and worker death; active work renews its lease.
 - [ ] Reconcile task/job records against ledger records.
-- [ ] Add tests for retries, parallel workers, partial slide completion, and duplicate callbacks.
+- [x] Add tests for retries, parallel workers, partial slide completion, duplicate callbacks, and reservation renewal.
 
 Exit criteria:
 
@@ -144,12 +144,12 @@ Exit criteria:
 
 ### 3.2 Data rights and retention
 
-- [ ] Build authenticated user data export.
-- [ ] Build account deletion with reauthentication and a cooling-off period if appropriate.
+- [x] Build authenticated user data export.
+- [x] Build account deletion with password or OAuth username-confirmation reauthentication; decide whether a cooling-off period is required.
 - [ ] Define retention for projects, uploaded source documents, generated files, logs, payment records, and deleted accounts.
-- [ ] Implement deletion/anonymization jobs for every storage backend.
+- [x] Delete/anonymize mapped database records and stored artifact objects for the configured local/S3 backend.
 - [ ] Define legally required exceptions for invoices, fraud prevention, and audit records.
-- [ ] Test that ownership checks prevent export/deletion of another user’s data.
+- [x] Test that ownership checks prevent export/deletion of another user’s data.
 
 ### 3.3 Processor and security disclosures
 
@@ -170,7 +170,7 @@ Exit criteria:
 - [ ] Add structured JSON logging with request, user-safe, task, order, and provider request identifiers.
 - [ ] Ensure logs never contain passwords, tokens, provider keys, verification codes, raw payment payloads, or sensitive documents.
 - [ ] Integrate error tracking.
-- [ ] Protect metrics from public anonymous access.
+- [x] Protect metrics with a dedicated bearer token and wire ServiceMonitor secret authentication.
 - [ ] Add dashboards and alerts for error rate, latency, queue depth, worker failures, database saturation, storage errors, email failures, and payment failures.
 - [ ] Assign alert and on-call ownership.
 
@@ -225,7 +225,7 @@ Exit criteria:
 
 ## Final launch gates
 
-- [ ] Full automated test suite passes.
+- [x] Full automated test suite passes locally (`1130 passed`, `19 skipped`).
 - [ ] PostgreSQL migrations pass fresh-install and upgrade rehearsals.
 - [ ] Stripe test-mode end-to-end purchase, delayed payment, duplicate webhook, refund, and dispute scenarios pass.
 - [ ] A small-value live-mode purchase and refund rehearsal passes.
@@ -238,4 +238,3 @@ Exit criteria:
 - [ ] Accessibility and supported-browser acceptance pass.
 - [ ] Incident, support, refund, and rollback runbooks are approved.
 - [ ] Owner signs off on launch risk and rollback criteria.
-

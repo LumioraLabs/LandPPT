@@ -51,6 +51,10 @@ observability:
     interval: 30s
     scrapeTimeout: 10s
     labels: {}
+    # Defaults to app.existingSecret when empty. The Secret must contain the
+    # dedicated metrics token; do not reuse a user session or general API key.
+    bearerTokenSecret: ""
+    bearerTokenSecretKey: LANDPPT_METRICS_BEARER_TOKEN
 
 image:
   repository: bradleylzh/landppt
@@ -83,7 +87,8 @@ app:
   # 使用已有 Secret（key 即环境变量名）。生产环境必须设置 existingSecret，
   # 并在 existingSecretKeys 中声明这些键名（值留在集群里，不要写进 Git）：
   # SECRET_KEY, LANDPPT_CONFIG_ENCRYPTION_KEYS, STRIPE_SECRET_KEY,
-  # STRIPE_WEBHOOK_SECRET, LANDPPT_BILLING_CREDIT_PACKS_JSON
+  # STRIPE_WEBHOOK_SECRET, LANDPPT_BILLING_CREDIT_PACKS_JSON,
+  # LANDPPT_METRICS_BEARER_TOKEN
   existingSecret: ""
   existingSecretKeys: []
   production: false

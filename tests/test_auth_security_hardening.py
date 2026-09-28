@@ -2,6 +2,7 @@ import hashlib
 import time
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -149,3 +150,123 @@ def test_proxy_headers_are_used_only_for_trusted_direct_peers(monkeypatch):
 
     request.client.host = "10.1.2.3"
     assert get_client_ip(request) == "198.51.100.20"
+
+
+@pytest.mark.asyncio
+async def test_api_login_and_logout_manage_the_session_cookie(monkeypatch):
+    from starlette.requests import Request
+
+    import landppt.auth.routes as auth_routes
+    from landppt.auth.routes import api_login, api_logout
+    from landppt.database.models import User
+
+    class FakeDB:
+        def commit(self):
+            return None
+
+    class FakeAuth:
+        logged_out = None
+
+        def authenticate_user(self, _db, _username, _password):
+            return user
+
+        def create_session(self, _db, _user):
+            return "api-session-id"
+
+        def _get_current_expire_minutes(self):
+            return 30
+
+        def logout_user(self, _db, session_id):
+            self.logged_out = session_id
+            return True
+
+    user = User(
+        username="api-user",
+        email="api@example.com",
+        is_active=True,
+        is_admin=False,
+        credits_balance=0,
+    )
+    user.id = 42
+    user.set_password("a sufficiently long password")
+    auth = FakeAuth()
+
+    async def allow_attempt(_request, _username):
+        return True, None
+
+    monkeypatch.setattr(auth_routes, "_record_failed_login", allow_attempt)
+    login_request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/auth/login",
+            "headers": [],
+            "client": ("127.0.0.1", 1234),
+        }
+    )
+    login_response = await api_login(
+        login_request,
+        username="api-user",
+        password="correct",
+        db=FakeDB(),
+        auth_service=auth,
+    )
+    login_cookie = login_response.headers.get("set-cookie", "")
+    assert "session_id=api-session-id" in login_cookie
+    assert "HttpOnly" in login_cookie
+    assert "Max-Age=1800" in login_cookie
+
+    logout_request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/auth/logout",
+            "headers": [(b"cookie", b"session_id=api-session-id")],
+            "client": ("127.0.0.1", 1234),
+        }
+    )
+    logout_response = await api_logout(
+        logout_request,
+        db=FakeDB(),
+        auth_service=auth,
+    )
+    assert auth.logged_out == "api-session-id"
+    logout_cookie = logout_response.headers.get("set-cookie", "")
+    assert "session_id=" in logout_cookie
+    assert "Max-Age=0" in logout_cookie
+
+
+@pytest.mark.asyncio
+async def test_api_login_rate_limit_runs_before_password_verification(monkeypatch):
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    import landppt.auth.routes as auth_routes
+
+    class AuthMustNotRun:
+        def authenticate_user(self, *_args):
+            raise AssertionError("password verification must not run after the limit")
+
+    async def deny_attempt(_request, _username):
+        return False, 321
+
+    monkeypatch.setattr(auth_routes, "_record_failed_login", deny_attempt)
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/auth/login",
+            "headers": [],
+            "client": ("127.0.0.1", 1234),
+        }
+    )
+    with pytest.raises(HTTPException) as caught:
+        await auth_routes.api_login(
+            request,
+            username="limited-user",
+            password="wrong",
+            db=object(),
+            auth_service=AuthMustNotRun(),
+        )
+    assert caught.value.status_code == 429
+    assert caught.value.headers["Retry-After"] == "321"

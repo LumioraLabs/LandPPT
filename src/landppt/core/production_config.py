@@ -44,6 +44,7 @@ def validate_production_config(config: AppConfig) -> None:
     _check_cookies_and_csrf(config, errors)
     _check_trusted_proxies(config, errors)
     _check_cors(config, errors)
+    _check_metrics_token(config, errors)
     _check_database(config, errors)
     _check_billing(config, errors)
 
@@ -134,6 +135,15 @@ def _check_cors(config: AppConfig, errors: list[str]) -> None:
         errors.append(
             "LANDPPT_CORS_ALLOWED_ORIGINS must not be * when credentialed "
             "production traffic is enabled"
+        )
+
+
+def _check_metrics_token(config: AppConfig, errors: list[str]) -> None:
+    token = str(config.metrics_bearer_token or "").strip()
+    if len(token) < _MIN_SECRET_LENGTH:
+        errors.append(
+            "LANDPPT_METRICS_BEARER_TOKEN must be at least "
+            f"{_MIN_SECRET_LENGTH} characters"
         )
 
 

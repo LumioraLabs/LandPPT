@@ -68,6 +68,7 @@ class AuthMiddleware:
             "/",
             "/health",
             "/ready",
+            "/metrics",
             "/auth/login",
             "/auth/logout",
             "/auth/github/login",
@@ -116,7 +117,7 @@ class AuthMiddleware:
         if _is_api_path(path):
             return False
 
-        if path in {"/favicon.ico", "/ready"}:
+        if path in {"/favicon.ico", "/health", "/ready", "/metrics"}:
             return False
 
         return not path.startswith(("/static/", "/temp/"))
@@ -195,15 +196,10 @@ class AuthMiddleware:
                             return db
 
                         try:
-                            user: Optional[User] = None
-                            session_id = _extract_session_id(request)
-                            if session_id:
-                                user = await self._get_user_from_session_cache(
-                                    session_id
-                                )
-
-                            if not user:
-                                user = self._resolve_request_user(request, ensure_db())
+                            # Database state is authoritative for revocation and
+                            # account deactivation. A cached session is only a
+                            # write-through optimization and must never outlive it.
+                            user = self._resolve_request_user(request, ensure_db())
 
                             if user:
                                 request.state.user = user
@@ -234,13 +230,10 @@ class AuthMiddleware:
                     return db
 
                 try:
-                    user: Optional[User] = None
-                    session_id = _extract_session_id(request)
-                    if session_id:
-                        user = await self._get_user_from_session_cache(session_id)
-
-                    if not user:
-                        user = self._resolve_request_user(request, ensure_db())
+                    # Always validate sessions against the database. Cache
+                    # invalidation is best-effort and cannot be an authorization
+                    # boundary for logout, password reset, or account deletion.
+                    user = self._resolve_request_user(request, ensure_db())
 
                     if not user:
                         # Unauthenticated request

@@ -28,10 +28,34 @@ from ..services.billing_service import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/billing", tags=["billing"])
+MAX_STRIPE_WEBHOOK_BYTES = 1024 * 1024
 
 
 class CheckoutRequest(BaseModel):
     pack_id: str = Field(min_length=1, max_length=64)
+
+
+async def _read_webhook_body(request: Request) -> bytes:
+    """Read a public webhook with a hard ceiling before signature verification."""
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            declared_size = int(content_length)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail="Invalid Content-Length"
+            ) from exc
+        if declared_size < 0:
+            raise HTTPException(status_code=400, detail="Invalid Content-Length")
+        if declared_size > MAX_STRIPE_WEBHOOK_BYTES:
+            raise HTTPException(status_code=413, detail="Webhook payload is too large")
+
+    payload = bytearray()
+    async for chunk in request.stream():
+        payload.extend(chunk)
+        if len(payload) > MAX_STRIPE_WEBHOOK_BYTES:
+            raise HTTPException(status_code=413, detail="Webhook payload is too large")
+    return bytes(payload)
 
 
 @router.get("/api/packages")
@@ -146,9 +170,9 @@ async def stripe_webhook(
     stripe_signature: Optional[str] = Header(None, alias="Stripe-Signature"),
 ):
     """Verify and idempotently fulfill Stripe snapshot events."""
-    payload = await request.body()
     if not stripe_signature:
         raise HTTPException(status_code=400, detail="Missing webhook signature")
+    payload = await _read_webhook_body(request)
     try:
         event = verify_stripe_webhook(payload, stripe_signature)
     except BillingConfigurationError:
